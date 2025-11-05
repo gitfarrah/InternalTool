@@ -370,10 +370,16 @@ def main() -> None:
 
             # Avoid double-processing the same code
             if st.session_state.get("slack_oauth_done"):
+                logger.info("OAuth already processed, clearing params and rerunning")
                 try:
                     st.query_params.clear()
                 except Exception:
                     pass
+                # Ensure chat state exists before rerun
+                if "chat_messages" not in st.session_state:
+                    st.session_state["chat_messages"] = [
+                        {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+                    ]
                 st.rerun()
 
             token = exchange_code_for_token(query_params["code"])
@@ -383,15 +389,31 @@ def main() -> None:
             st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
             st.session_state["slack_user_id"] = user_info.get("id", "")
             st.session_state["slack_oauth_done"] = True
-            # Clear URL params and rerun
+            
+            # Ensure chat_messages exists after OAuth (might be lost during redirect)
+            if "chat_messages" not in st.session_state:
+                st.session_state["chat_messages"] = [
+                    {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+                ]
+                logger.info("Reinitialized chat_messages after OAuth")
+            
+            logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
+            logger.info(f"Chat messages after OAuth: {len(st.session_state.get('chat_messages', []))} messages")
+            
+            # Clear URL params
             try:
                 st.query_params.clear()
             except Exception:
                 pass
+            
             st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
+            
+            # Reset oauth_done flag and rerun to reload the page cleanly
+            st.session_state["slack_oauth_done"] = False
             st.rerun()
         except Exception as e:
             msg = str(e)
+            logger.error(f"OAuth error: {msg}", exc_info=True)
             if "invalid_code" in msg:
                 st.warning("OAuth code expired or already used. Please click Connect to Slack again.")
                 try:
@@ -402,6 +424,7 @@ def main() -> None:
                     del st.session_state["slack_oauth_state"]
                 st.stop()
             st.error(f"❌ Authentication failed: {msg}")
+            logger.error(f"OAuth authentication failed: {msg}", exc_info=True)
             st.stop()
 
     # Auth gate: require Slack token to search Slack; allow rest to run but show connect if missing
@@ -451,10 +474,12 @@ def main() -> None:
         st.divider()
         auto_refresh = True
         
+    # Initialize chat state - must be done early, before any OAuth redirects
     if "chat_messages" not in st.session_state:
         st.session_state["chat_messages"] = [
             {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
         ]
+        logger.info("Initialized chat_messages in session state")
     
     if "context" not in st.session_state:
         st.session_state["context"] = None
@@ -464,23 +489,56 @@ def main() -> None:
         st.session_state["conf_results"] = []
     if "filters" not in st.session_state:
         st.session_state["filters"] = {}
+    
+    logger.debug(f"Chat state initialized. Messages count: {len(st.session_state.get('chat_messages', []))}")
 
-    for msg in st.session_state["chat_messages"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # Display chat messages - handle errors gracefully
+    try:
+        chat_messages = st.session_state.get("chat_messages", [])
+        if not chat_messages:
+            # Reinitialize if empty
+            st.session_state["chat_messages"] = [
+                {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+            ]
+            chat_messages = st.session_state["chat_messages"]
+        
+        for msg in chat_messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg.get("content", ""))
+    except Exception as e:
+        logger.error(f"Error displaying chat messages: {e}", exc_info=True)
+        # Reinitialize chat if corrupted
+        st.session_state["chat_messages"] = [
+            {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+        ]
+        with st.chat_message("assistant"):
+            st.markdown("Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources.")
 
     user_input = st.chat_input("Type your question")
 
     if user_input:
+        logger.info(f"User input received: {user_input[:100]}...")
         try:
+            # Ensure chat_messages exists (might have been lost during OAuth redirect)
+            if "chat_messages" not in st.session_state:
+                st.session_state["chat_messages"] = [
+                    {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+                ]
+                logger.info("Reinitialized chat_messages after OAuth redirect")
+            
             # Add user message to chat immediately
             st.session_state["chat_messages"].append({"role": "user", "content": user_input})
+            logger.info(f"Added user message. Total messages: {len(st.session_state['chat_messages'])}")
+            
             with st.chat_message("user"):
                 st.write(user_input)
         except Exception as e:
             logger.error(f"Error adding user message to chat: {e}", exc_info=True)
             st.error(f"Error processing your message: {e}")
-            st.stop()
+            # Instead of stopping, show error and continue
+            if "chat_messages" not in st.session_state:
+                st.session_state["chat_messages"] = []
+            st.session_state["chat_messages"].append({"role": "assistant", "content": f"Error: {str(e)}"})
 
         try:
             with st.chat_message("assistant"):
