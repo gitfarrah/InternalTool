@@ -155,7 +155,7 @@ def get_qdrant_client():
         raise
 
 
-@tool(    "search_docs",
+@tool("search_docs",
     description="""Search documents in Qdrant collection.
     
     Args:
@@ -175,8 +175,36 @@ def search_docs(query: str, limit: int = 5):
         collection_name="docs",
         query_vector=("content_vector", query_vector),
         limit=limit,
-        with_payload=True
+        with_payload=True,
+        score_threshold=0.0  # Get all results, let relevance scoring handle ranking
     )
+    
+    # Log relevance scores for knowledge base results
+    logger.info("=" * 80)
+    logger.info("KNOWLEDGE BASE RELEVANCE SCORES (Qdrant Search Results):")
+    logger.info("=" * 80)
+    for idx, result in enumerate(search_result[:10], 1):
+        # Handle both ScoredPoint and dict formats
+        if hasattr(result, 'score'):
+            score = result.score
+            payload = result.payload if hasattr(result, 'payload') else {}
+        elif isinstance(result, dict):
+            score = result.get('score', 0.0)
+            payload = result.get('payload', {})
+        else:
+            score = 0.0
+            payload = {}
+        
+        title = payload.get('title', 'Unknown')
+        url = payload.get('url', '')
+        text_preview = (payload.get('text', '') or payload.get('content', ''))[:60]
+        logger.info(f"{idx}. Score: {score:.4f} | Title: {title}")
+        if url:
+            logger.info(f"   URL: {url}")
+        if text_preview:
+            logger.info(f"   Preview: {text_preview}...")
+    logger.info("=" * 80)
+    
     return search_result
 
 env_url = os.getenv("INCORTA_ENV_URL")
@@ -382,21 +410,44 @@ if __name__ == "__main__":
         question = input("Enter your question: ")
         if question.lower() == 'exit':
             break
+        print("\n" + "="*80)
+        print("AGENT THINKING CHAIN:")
+        print("="*80)
+        
         for chunk in agent_executor.stream({"input": question}):
+            # Print agent thinking/thoughts
+            if "intermediate_steps" in chunk:
+                for step in chunk["intermediate_steps"]:
+                    if hasattr(step, 'action') and hasattr(step, 'observation'):
+                        print(f"\n💭 Thought: {getattr(step.action, 'tool_input', {}).get('input', 'Processing...')}")
+                        print(f"🔧 Action: {step.action.tool}")
+                        print(f"📥 Input: {step.action.tool_input}")
+                        print(f"📤 Observation: {str(step.observation)[:200]}...")
+            
             # Print agent actions (tool calls)
             if "actions" in chunk:
                 for action in chunk["actions"]:
-                    print(f"\n🔧 Tool Call: {action.tool}")
+                    print(f"\n💭 Thought: {getattr(action, 'log', '')[:200] if hasattr(action, 'log') else 'Taking action...'}")
+                    print(f"🔧 Tool Call: {action.tool}")
                     print(f"📥 Input: {action.tool_input}")
             
             # Print tool observations (tool outputs)
             if "steps" in chunk:
                 for step in chunk["steps"]:
-                    print(f"\n📤 Tool Output ({step.action.tool}):")
-                    print(f"{step.observation}")
+                    print(f"\n💭 Thought: {getattr(step.action, 'log', '')[:200] if hasattr(step.action, 'log') else 'Processing result...'}")
+                    print(f"📤 Tool Output ({step.action.tool}):")
+                    print(f"{str(step.observation)[:300]}...")
+            
+            # Print agent scratchpad (thinking process)
+            if "agent" in chunk and hasattr(chunk["agent"], "scratchpad"):
+                scratchpad = str(chunk["agent"].scratchpad)
+                if scratchpad:
+                    print(f"\n💭 Agent Scratchpad: {scratchpad[:300]}...")
             
             # Print final output
             if "output" in chunk:
-                print(f"\n✅ Final Answer:")
+                print("\n" + "="*80)
+                print("✅ FINAL ANSWER:")
+                print("="*80)
                 print(f"{chunk['output']}")
-                print("\n" + "="*60 + "\n")
+                print("\n" + "="*80 + "\n")
