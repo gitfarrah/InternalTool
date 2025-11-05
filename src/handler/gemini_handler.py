@@ -162,45 +162,52 @@ For **Troubleshooting & Solutions**:
    - ALWAYS begin your answer by explicitly mentioning the source(s) you're using
    - Examples:
      * "According to the documentation..." (for knowledge_base)
-     * "Based on Slack discussions..." (for slack)
+     * "Based on Slack discussions in #channel-name..." (for slack - include channel context)
      * "According to Confluence pages..." (for confluence)
      * "Based on multiple sources..." (when synthesizing)
-   - For installation/step-by-step guides: Provide clear numbered steps with headings
+   - Integrate source citations naturally throughout the answer (e.g., "As mentioned in Slack channel #release-announcements...", "The documentation states...")
+   - For installation/step-by-step guides: Provide clear numbered steps with descriptive headings
    - For technical explanations: Use structured sections with headings (e.g., "In your scenario:", "Recommendation/Actionable Insight:")
    - Lead with the direct answer to the question
    - Follow with supporting context and details
-   - End with actionable next steps if relevant (especially for PM queries)
+   - End with actionable recommendations when relevant (not hardcoded "Actionable Insight for PMs" sections)
 
 2. **Length**:
    - Simple queries: 2-4 sentences
    - Complex queries: 4-8 sentences with structured information
-   - Installation/how-to queries: Structured step-by-step format with clear headings
-   - PM-focused queries: Include recommendations based on data patterns
+   - Installation/how-to queries: MUST provide detailed step-by-step format with numbered steps and clear headings
+   - Technical queries: Include structured explanations with relevant sections
 
 3. **Tone**:
    - Concise, factual, and professional
    - No filler, disclaimers, or apologetic language
    - When uncertain, state explicitly what's missing or unclear
+   - NO hardcoded sections like "Actionable Insight for PMs" or "Installation Resources Found"
 
 4. **Query-Specific Guidance**:
    - "when/date" queries: Give explicit dates/timeframes if available
    - "how/why" queries: Provide actionable explanations with numbered steps when appropriate
-   - "installation/setup" queries: MUST provide step-by-step guide with clear headings and numbered steps
+   - "installation/setup/step by step" queries: MUST provide detailed step-by-step guide with:
+     * Clear numbered steps (1., 2., 3., etc.)
+     * Descriptive headings for each step or section
+     * Specific instructions from the documentation
+     * Integration of relevant information from multiple sources
    - "status" queries: Include current state and next steps
    - "customer impact" queries: Reference Zendesk patterns if available
    - "roadmap" queries: Cross-reference Jira tickets with Confluence plans
-   - For scenarios/problems: Use structured format with "In your scenario:" and "Recommendation/Actionable Insight:" sections
+   - For scenarios/problems: Use structured format with "In your scenario:" and "Recommendation/Actionable Insight:" sections (but make recommendations specific to the query, not generic PM advice)
 
-5. **PM-Specific Value**:
-   - Identify patterns across customer tickets (Zendesk) and internal issues (Jira)
-   - Connect customer pain points to product features and roadmap
-   - Provide data-driven recommendations when relevant
-   - Highlight discrepancies between documentation and actual implementation
+5. **Citation Integration**:
+   - DO NOT list citations separately (e.g., "Installation Resources Found:")
+   - Integrate citations naturally into the answer text
+   - When mentioning information from Slack, include the channel name (e.g., "According to discussions in #release-announcements...")
+   - When referencing documentation, mention it naturally (e.g., "The documentation states...", "As noted in the installation guide...")
+   - Use bold formatting for key terms and section headers (e.g., "**1. Join Type:**", "**2. Filter Placement:**")
 
 **Output Format** (JSON only):
 {
   "exists": boolean,                       // true if relevant info was found
-  "answer": "Synthesized answer: direct response first, then supporting context and actionable insights for PMs",
+  "answer": "Synthesized answer: direct response first, then supporting context. For step-by-step queries, include numbered steps with headings. Integrate citations naturally into the text.",
   "citations": [
       {
         "url": string,
@@ -214,8 +221,12 @@ For **Troubleshooting & Solutions**:
 **Special Instructions:**
 - If passages are incomplete: State what's available and what's missing
 - If no relevant information found: Set exists=false, explain briefly
-- For PM queries about recommendations: Synthesize insights from multiple sources
-- For cross-source patterns: Explicitly connect the dots (e.g., "Zendesk tickets show X, while Jira backlog addresses Y")
+- For step-by-step queries: Provide detailed numbered steps with clear headings (e.g., "**1. Prerequisites:**", "**2. Installation Steps:**")
+- DO NOT include hardcoded sections like "Actionable Insight for PMs" or "Installation Resources Found"
+- Integrate citations naturally into the answer text, not as separate lists
+- When mentioning Slack, include channel context (e.g., "According to Slack discussions in #channel-name...")
+- For recommendations: Make them specific to the query context, not generic PM advice
+- Use bold formatting for section headers and key terms in the answer
 
 Return strictly valid JSON. No markdown, no commentary, no explanations outside the JSON object.
 """
@@ -306,10 +317,13 @@ def build_enhanced_prompt(
             "If date is uncertain, check multiple sources and note any discrepancies."
         )
 
-    if any(term in query_lower for term in ["how to", "configure", "setup", "implement", "install"]):
+    if any(term in query_lower for term in ["how to", "configure", "setup", "implement", "install", "step by step", "step-by-step"]):
         additional_instructions += (
-            "\n⚠️ HOW-TO QUERY: Prioritize knowledge_base and Confluence documentation. "
-            "Provide step-by-step guidance if available. Include links to detailed guides."
+            "\n⚠️ HOW-TO/INSTALLATION QUERY: Prioritize knowledge_base and Confluence documentation. "
+            "MUST provide detailed step-by-step instructions with numbered steps and clear headings. "
+            "DO NOT summarize - provide actual installation steps from the documentation. "
+            "Integrate relevant information from Slack discussions naturally into the steps if helpful. "
+            "DO NOT create separate sections like 'Installation Resources Found' - weave citations into the answer."
         )
 
     if any(term in query_lower for term in ["customer", "issue", "problem", "bug", "ticket"]):

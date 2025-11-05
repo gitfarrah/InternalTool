@@ -782,6 +782,9 @@ def main() -> None:
                             
                             if answer_result and answer_result.get("exists"):
                                 summary_text = answer_result.get("answer", "")
+                                citations = answer_result.get("citations", [])
+                                # Store citations for filtering sources display
+                                st.session_state["answer_citations"] = citations
                                 logger.info("Generated answer with citations successfully")
                             else:
                                 # If answer_with_citations failed, try fallback with better prompt
@@ -797,6 +800,7 @@ def main() -> None:
                         else:
                             logger.warning("No passages prepared - cannot generate answer")
                             summary_text = "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
+                            st.session_state["answer_citations"] = []
                     except Exception as e:
                         logger.error(f"Error generating structured answer: {e}", exc_info=True)
                         # Fallback to simple summary
@@ -812,13 +816,8 @@ def main() -> None:
                         except Exception:
                             summary_text = "An error occurred while generating the answer. Please try again."
 
-                grouped_output = _format_grouped_response(
-                    summary_text,
-                    slack_results,
-                    conf_results,
-                )
-
-                st.markdown(grouped_output)
+                # Display answer directly (no "Summary:" prefix)
+                st.markdown(summary_text)
 
                 # Agent Trace: log to terminal instead of UI
                 try:
@@ -838,10 +837,46 @@ def main() -> None:
                 except Exception:
                     pass
 
-                if slack_results or conf_results or docs_results or zendesk_results or jira_results:
-                    _render_sources(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                # Filter sources to show only cited ones (or top 5 if no citations)
+                answer_citations = st.session_state.get("answer_citations", [])
                 
-                st.session_state["chat_messages"].append({"role": "assistant", "content": grouped_output})
+                if answer_citations:
+                    # Extract URLs from citations to filter sources
+                    cited_urls = {c.get("url", "") for c in answer_citations}
+                    
+                    # Filter Slack results to only cited ones
+                    filtered_slack = [r for r in (slack_results or []) if r.get('permalink', '') in cited_urls]
+                    # If no citations match, show top 5 by relevance
+                    if not filtered_slack:
+                        filtered_slack = sorted(slack_results or [], key=lambda x: x.get('relevance_score', 0), reverse=True)[:5]
+                    
+                    # Filter Confluence results
+                    filtered_conf = [r for r in (conf_results or []) if r.get('url', '') in cited_urls]
+                    if not filtered_conf:
+                        filtered_conf = sorted(conf_results or [], key=lambda x: x.get('score', 0), reverse=True)[:5]
+                    
+                    # Filter Knowledge Base results
+                    filtered_docs = []
+                    for d in (docs_results or []):
+                        url = d.get('url', '') if isinstance(d, dict) else (d.payload.get('url', '') if hasattr(d, 'payload') else '')
+                        if url in cited_urls:
+                            filtered_docs.append(d)
+                    if not filtered_docs:
+                        filtered_docs = sorted(docs_results or [], 
+                                              key=lambda x: x.get('score', 0) if isinstance(x, dict) else (x.score if hasattr(x, 'score') else 0), 
+                                              reverse=True)[:5]
+                else:
+                    # No citations, show top 5 by relevance
+                    filtered_slack = sorted(slack_results or [], key=lambda x: x.get('relevance_score', 0), reverse=True)[:5]
+                    filtered_conf = sorted(conf_results or [], key=lambda x: x.get('score', 0), reverse=True)[:5]
+                    filtered_docs = sorted(docs_results or [], 
+                                          key=lambda x: x.get('score', 0) if isinstance(x, dict) else (x.score if hasattr(x, 'score') else 0), 
+                                          reverse=True)[:5]
+                
+                if filtered_slack or filtered_conf or filtered_docs or zendesk_results or jira_results:
+                    _render_sources(filtered_slack, filtered_conf, filtered_docs, zendesk_results, jira_results)
+                
+                st.session_state["chat_messages"].append({"role": "assistant", "content": summary_text})
 
                 new_entry = {
                     "question": user_input.strip(),
