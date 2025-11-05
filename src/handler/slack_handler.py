@@ -43,6 +43,13 @@ SCORE_THREAD_SEARCH_TERM = 8.0
 SCORE_THREAD_PARENT_BONUS = 5.0
 SCORE_THREAD_CONFIRMATION_PATTERN = 10.0
 
+# Entity similarity scoring weights (for version matching)
+ENTITY_SIMILARITY_MAJOR_MINOR = 0.9  # Same major.minor version
+ENTITY_SIMILARITY_MINOR_PATCH = 0.8  # Same minor.patch version (different major)
+ENTITY_SIMILARITY_MINOR_ONLY = 0.6   # Same minor version only
+ENTITY_SIMILARITY_PATCH_ONLY = 0.4   # Same patch version only
+ENTITY_SIMILARITY_NONE = 0.0          # No similarity
+
 # Final ranking weights (alpha, beta, gamma in the formula)
 RANKING_ALPHA = 0.6  # Semantic relevance weight
 RANKING_BETA = 0.2   # Slack native score weight
@@ -1014,24 +1021,24 @@ def _calculate_entity_similarity(entity1: str, entities2: List[str]) -> float:
         if not parts2:
             continue
         
-        # Calculate similarity based on version structure
+        # Calculate similarity based on version structure (using configurable constants)
         if len(parts1) >= 2 and len(parts2) >= 2:
             # Same major.minor version
             if parts1[0] == parts2[0] and parts1[1] == parts2[1]:
-                similarity = 0.9
+                similarity = ENTITY_SIMILARITY_MAJOR_MINOR
             # Related versions (e.g., 25.7.2 vs 2024.7.5 - same minor.patch)
             elif len(parts1) >= 3 and len(parts2) >= 3 and parts1[1] == parts2[1] and parts1[2] == parts2[2]:
-                similarity = 0.8
+                similarity = ENTITY_SIMILARITY_MINOR_PATCH
             # Same minor version
             elif parts1[1] == parts2[1]:
-                similarity = 0.6
+                similarity = ENTITY_SIMILARITY_MINOR_ONLY
             # Same patch version
             elif len(parts1) >= 3 and len(parts2) >= 3 and parts1[2] == parts2[2]:
-                similarity = 0.4
+                similarity = ENTITY_SIMILARITY_PATCH_ONLY
             else:
-                similarity = 0.0
+                similarity = ENTITY_SIMILARITY_NONE
         else:
-            similarity = 0.0
+            similarity = ENTITY_SIMILARITY_NONE
         
         max_similarity = max(max_similarity, similarity)
     
@@ -1335,7 +1342,7 @@ def _rank_results(
     return final_results
 
 
-def search_slack_simplified(
+def search_slack(
     user_query: str,
     intent_data: Dict[str, Any],
     max_total_results: int = 15,  # TOP 15 limit for UI
@@ -1589,4 +1596,4 @@ def search_slack_simplified(
     return ranked_results
 
 
-__all__ = ["search_slack_simplified"]
+__all__ = ["search_slack"]

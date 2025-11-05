@@ -15,7 +15,7 @@ from langchain.agents import create_react_agent, AgentExecutor
 from langchain_core.prompts import PromptTemplate
 
 from ..handler.confluence_handler import search_confluence
-from ..handler.slack_handler import search_slack_simplified
+from ..handler.slack_handler import search_slack
 from ..storage.cache_manager import get_cached_search_results, cache_search_results
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,7 @@ def search_slack_messages(
     }
 
     # Use the simplified search
-    results = search_slack_simplified(query, intent_data, max_results)
+    results = search_slack(query, intent_data, max_results)
     
     # Convert to legacy format for compatibility
     legacy_results = []

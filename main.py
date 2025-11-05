@@ -3,7 +3,7 @@ import logging
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from src.handler.confluence_handler import search_confluence
-from src.handler.slack_handler import search_slack_simplified
+from src.handler.slack_handler import search_slack
 from dotenv import load_dotenv
 import os
 import requests
@@ -120,7 +120,7 @@ def search_slack_messages(
     }
 
     # Use the new simplified search
-    results = search_slack_simplified(query, intent_data, max_results)
+    results = search_slack(query, intent_data, max_results)
     
     # Convert to legacy format for compatibility
     legacy_results = []

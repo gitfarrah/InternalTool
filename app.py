@@ -20,7 +20,7 @@ import streamlit as st
 from src.handler.confluence_handler import search_confluence_optimized
 from src.handler.gemini_handler import ask_gemini, answer_with_citations
 from src.handler.intent_analyzer import analyze_user_intent, validate_intent
-from src.handler.slack_handler import search_slack_simplified
+from src.handler.slack_handler import search_slack
 from src.storage.cache_manager import (
     get_cached_search_results, cache_search_results,
     get_cached_intent_analysis, cache_intent_analysis,
@@ -630,7 +630,7 @@ def main() -> None:
 
                             if "slack" in data_sources:
                                 futures["slack"] = pool.submit(
-                                    search_slack_simplified,
+                                    search_slack,
                                     user_input,
                                     intent_data,
                                     15,
