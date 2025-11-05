@@ -1261,6 +1261,10 @@ def _calculate_final_score(
     base_score = (RANKING_ALPHA * normalized_semantic) + (RANKING_BETA * slack_score) + (RANKING_GAMMA * normalized_thread)
     final_score = base_score * adaptive_boost * version_boost
     
+    # Normalize final score to 0-1 range (cap at 1.0)
+    # This ensures all scores are comparable and in the same 0-1 scale
+    final_score = min(final_score, 1.0)
+    
     # Log relevance score breakdown for debugging
     channel_name = result.get("channel", "unknown")
     logger.debug(f"Relevance Score for #{channel_name}: "
