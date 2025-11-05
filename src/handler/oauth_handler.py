@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import requests
 import streamlit as st
 from slack_sdk.web import WebClient
@@ -41,7 +42,7 @@ def _require_oauth_config() -> dict:
 
 
 def get_oauth_url() -> str:
-    """Generate Slack OAuth authorization URL."""
+    """Generate Slack OAuth authorization URL (user scopes) with state."""
     cfg = _require_oauth_config()
 
     # Request USER token scopes (use user_scope param)
@@ -54,11 +55,16 @@ def get_oauth_url() -> str:
         "users:read",
     ]
 
+    # CSRF/state token
+    state = secrets.token_urlsafe(24)
+    st.session_state["slack_oauth_state"] = state
+
     return (
         "https://slack.com/oauth/v2/authorize?"
         f"client_id={cfg['client_id']}&"
         f"user_scope={','.join(user_scopes)}&"
-        f"redirect_uri={cfg['redirect_uri']}"
+        f"redirect_uri={cfg['redirect_uri']}&"
+        f"state={state}"
     )
 
 
@@ -82,30 +88,57 @@ def exchange_code_for_token(code: str) -> str:
 
 
 def get_user_info(token: str) -> dict:
-    """Get authenticated user information."""
+    """Get authenticated user information, including display_name and real_name."""
     client = WebClient(token=token)
-    # users_identity requires appropriate scopes; fallback to auth_test + users_info if needed
+    user_id = ""
+    name = ""
+    email = ""
+    display_name = ""
+    real_name = ""
+
+    # Try users_identity first
     try:
         identity = client.users_identity()
-        return {
-            "id": identity["user"]["id"],
-            "name": identity["user"].get("name") or identity["user"].get("username", "Unknown"),
-            "email": identity["user"].get("email", ""),
-        }
+        user_id = identity["user"]["id"]
+        # Slack identity payload may not include profile; keep placeholders
     except Exception:
-        auth = client.auth_test()
-        user_id = auth.get("user_id", "")
-        name = auth.get("user", "")
-        email = ""
-        if user_id:
-            try:
-                ui = client.users_info(user=user_id)
-                profile = (ui.get("user") or {}).get("profile", {})
-                email = profile.get("email", "")
-                name = profile.get("real_name") or profile.get("display_name") or name
-            except Exception:
-                pass
-        return {"id": user_id, "name": name or "Unknown", "email": email}
+        pass
+
+    # If no user_id yet, use auth_test
+    if not user_id:
+        try:
+            auth = client.auth_test()
+            user_id = auth.get("user_id", "")
+            name = auth.get("user", "")
+        except Exception:
+            pass
+
+    # Fetch full profile for display_name/real_name/email when we have an id
+    if user_id:
+        try:
+            ui = client.users_info(user=user_id)
+            user_obj = ui.get("user") or {}
+            profile = user_obj.get("profile", {})
+            email = profile.get("email", "")
+            display_name = profile.get("display_name", "")
+            real_name = profile.get("real_name", "")
+            # Fallback generic name if needed
+            if not name:
+                name = real_name or display_name or user_obj.get("name", "")
+        except Exception:
+            pass
+
+    # Final fallbacks
+    if not name:
+        name = "Unknown"
+
+    return {
+        "id": user_id or "",
+        "name": name,
+        "display_name": display_name or "",
+        "real_name": real_name or "",
+        "email": email or "",
+    }
 
 
 def is_token_valid(token: str) -> bool:

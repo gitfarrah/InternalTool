@@ -329,12 +329,32 @@ def main() -> None:
 
     if "code" in query_params:
         try:
+            # Validate state to avoid CSRF and code reuse issues
+            returned_state = query_params.get("state", "")
+            expected_state = st.session_state.get("slack_oauth_state", "")
+            if not returned_state or (expected_state and returned_state != expected_state):
+                st.error("❌ Authentication failed: invalid_state. Please try again.")
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                st.stop()
+
+            # Avoid double-processing the same code
+            if st.session_state.get("slack_oauth_done"):
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                st.rerun()
+
             token = exchange_code_for_token(query_params["code"])
             user_info = get_user_info(token)
             st.session_state["slack_token"] = token
             st.session_state["slack_user_name"] = user_info.get("name", "User")
             st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
             st.session_state["slack_user_id"] = user_info.get("id", "")
+            st.session_state["slack_oauth_done"] = True
             # Clear URL params and rerun
             try:
                 st.query_params.clear()
@@ -343,7 +363,18 @@ def main() -> None:
             st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
             st.rerun()
         except Exception as e:
-            st.error(f"❌ Authentication failed: {str(e)}")
+            msg = str(e)
+            if "invalid_code" in msg:
+                st.warning("OAuth code expired or already used. Please click Connect to Slack again.")
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                # Reset state so we can retry
+                if "slack_oauth_state" in st.session_state:
+                    del st.session_state["slack_oauth_state"]
+                st.stop()
+            st.error(f"❌ Authentication failed: {msg}")
             st.stop()
 
     # Auth gate: require Slack token to search Slack; allow rest to run but show connect if missing
