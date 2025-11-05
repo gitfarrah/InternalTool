@@ -335,7 +335,7 @@ def main() -> None:
             if expected_state and returned_state != expected_state:
                 st.error("❌ Authentication failed: invalid_state. Please try again.")
                 try:
-                    st.experimental_set_query_params()
+                    st.query_params.clear()
                 except Exception:
                     pass
                 st.stop()
@@ -343,7 +343,7 @@ def main() -> None:
             # Avoid double-processing the same code
             if st.session_state.get("slack_oauth_done"):
                 try:
-                    st.experimental_set_query_params()
+                    st.query_params.clear()
                 except Exception:
                     pass
                 st.rerun()
@@ -357,7 +357,7 @@ def main() -> None:
             st.session_state["slack_oauth_done"] = True
             # Clear URL params and rerun
             try:
-                st.experimental_set_query_params()
+                st.query_params.clear()
             except Exception:
                 pass
             st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
@@ -367,7 +367,7 @@ def main() -> None:
             if "invalid_code" in msg:
                 st.warning("OAuth code expired or already used. Please click Connect to Slack again.")
                 try:
-                    st.experimental_set_query_params()
+                    st.query_params.clear()
                 except Exception:
                     pass
                 if "slack_oauth_state" in st.session_state:
