@@ -14,7 +14,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 import streamlit as st
 
-from .channel_intelligence import get_channel_intelligence  # Use external module
+from .channel_intelligence import get_channel_intelligence, ChannelIntelligence  # Use external module
 
 logger = logging.getLogger(__name__)
 
@@ -1140,21 +1140,18 @@ def strategy_2_smart_targeted_search(
     user_query: str,
     intent_data: Dict[str, Any],
     version_info: Optional[Dict[str, Any]] = None,
-    is_release_query: bool = False
+    is_release_query: bool = False,
+    user_token: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Strategy 2: Smart Targeted Search (Channel/Time Intelligence)
-    
-    Enhanced with release intelligence:
-    - Prioritizes release channels when version numbers or release keywords detected
-    - Uses channel intelligence to find most relevant channels
-    - Searches ALL history in selected channels
-    - Applies semantic relevance scoring
     """
     logger.info(f"Strategy 2: Smart targeted search for: {user_query}")
     
-    client = _get_slack_client()
-    intelligence = get_channel_intelligence()
+    client = _get_slack_client(user_token)
+    # Build intelligence without relying on st.session_state inside threads
+    intelligence = ChannelIntelligence(client)
+    intelligence.initialize()
     
     # Extract parameters
     slack_params = intent_data.get("slack_params", {})
@@ -1860,8 +1857,9 @@ def search_slack_simplified(
     if is_latest_query and specific_channel and specific_channel.lower() not in ["all", "any", "none", ""]:
         logger.info(f"⚡ FAST PATH: Latest message query for channel '{specific_channel}'")
         
-        # Get channel ID using local helper
-        intelligence = get_channel_intelligence()
+        # Build intelligence with provided token
+        intelligence = ChannelIntelligence(_get_slack_client(user_token))
+        intelligence.initialize()
         channel_id = intelligence.get_channel_id_by_name(specific_channel)
         
         if channel_id:
@@ -1976,7 +1974,8 @@ def search_slack_simplified(
                 user_query, 
                 intent_data, 
                 version_info, 
-                is_release_query
+                is_release_query,
+                user_token
             )
             
             # Collect results with error handling
@@ -2012,7 +2011,7 @@ def search_slack_simplified(
         thread_candidates = _identify_thread_candidates(all_results, version_info, search_terms)
         
         # Search top 5 most promising threads
-        client = _get_slack_client()
+        client = _get_slack_client(user_token)
         for channel_id, thread_ts, priority in thread_candidates[:5]:
             logger.info(f"Searching thread {thread_ts} (priority: {priority:.1f})")
             thread_msgs = _search_message_thread(
@@ -2066,7 +2065,7 @@ def search_slack_simplified(
         ranked_results = ranked_results[:max_total_results]
     
     # STEP 7: Resolve user mentions ONLY for final top results (performance optimization)
-    client = _get_slack_client()
+    client = _get_slack_client(user_token)
     ranked_results = _resolve_mentions_in_results(client, ranked_results)
     
     logger.info(f"Final results: {len(ranked_results)} messages sent to UI")
