@@ -370,11 +370,18 @@ def main() -> None:
 
     # Add logout in sidebar if logged in
     with st.sidebar:
-        if st.session_state.get("slack_token") and st.button("Logout"):
-            for k in ["slack_token", "slack_user_name", "slack_user_id"]:
-                if k in st.session_state:
-                    del st.session_state[k]
-            st.rerun()
+        if st.session_state.get("slack_token"):
+            display_name = st.session_state.get("slack_user_name") or "Signed in"
+            display_id = st.session_state.get("slack_user_id") or ""
+            if display_id:
+                st.markdown(f"**Slack:** {display_name} (`{display_id}`)")
+            else:
+                st.markdown(f"**Slack:** {display_name}")
+            if st.button("Logout"):
+                for k in ["slack_token", "slack_user_name", "slack_user_id"]:
+                    if k in st.session_state:
+                        del st.session_state[k]
+                st.rerun()
 
     missing = _validate_env()
     if missing:
