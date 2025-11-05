@@ -333,13 +333,14 @@ def main() -> None:
             user_info = get_user_info(token)
             st.session_state["slack_token"] = token
             st.session_state["slack_user_name"] = user_info.get("name", "User")
+            st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
             st.session_state["slack_user_id"] = user_info.get("id", "")
             # Clear URL params and rerun
             try:
                 st.query_params.clear()
             except Exception:
                 pass
-            st.success(f"✅ Connected as {st.session_state['slack_user_name']}")
+            st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
             st.rerun()
         except Exception as e:
             st.error(f"❌ Authentication failed: {str(e)}")
@@ -371,14 +372,10 @@ def main() -> None:
     # Add logout in sidebar if logged in
     with st.sidebar:
         if st.session_state.get("slack_token"):
-            display_name = st.session_state.get("slack_user_name") or "Signed in"
-            display_id = st.session_state.get("slack_user_id") or ""
-            if display_id:
-                st.markdown(f"**Slack:** {display_name} (`{display_id}`)")
-            else:
-                st.markdown(f"**Slack:** {display_name}")
+            display_name = st.session_state.get("slack_user_display_name") or st.session_state.get("slack_user_name") or "Signed in"
+            st.markdown(f"**Slack:** {display_name}")
             if st.button("Logout"):
-                for k in ["slack_token", "slack_user_name", "slack_user_id"]:
+                for k in ["slack_token", "slack_user_name", "slack_user_display_name", "slack_user_id"]:
                     if k in st.session_state:
                         del st.session_state[k]
                 st.rerun()
@@ -482,6 +479,12 @@ def main() -> None:
                     jira_results: dict = {}
 
                     data_sources = intent_data.get("data_sources", ["slack", "confluence"])
+
+                    # Enforce Slack login: if no valid token, do not search Slack
+                    if ("slack_token" not in st.session_state) or (not is_token_valid(st.session_state.get("slack_token", ""))):
+                        if "slack" in data_sources:
+                            data_sources = [s for s in data_sources if s != "slack"]
+                            st.info("Sign in with Slack to search Slack (private and public channels).")
 
                     with ThreadPoolExecutor(max_workers=5) as pool:
                         futures = {}

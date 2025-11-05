@@ -356,12 +356,11 @@ class ChannelIntelligence:
 
 
 def get_channel_intelligence() -> ChannelIntelligence:
-    """Get or create ChannelIntelligence instance with caching."""
+    """Get or create ChannelIntelligence instance with caching; requires user OAuth token."""
     if "channel_intelligence" not in st.session_state:
-        # Prefer user OAuth token
-        token = st.session_state.get("slack_token") or st.secrets.get("SLACK_USER_TOKEN")
+        token = st.session_state.get("slack_token")
         if not token:
-            raise RuntimeError("Missing Slack token. Authenticate via OAuth or set SLACK_USER_TOKEN.")
+            raise RuntimeError("Missing Slack token. Authenticate via OAuth.")
         client = WebClient(token=token)
         st.session_state["channel_intelligence"] = ChannelIntelligence(client)
     intelligence = st.session_state["channel_intelligence"]
