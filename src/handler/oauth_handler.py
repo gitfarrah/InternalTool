@@ -44,7 +44,8 @@ def get_oauth_url() -> str:
     """Generate Slack OAuth authorization URL."""
     cfg = _require_oauth_config()
 
-    scopes = [
+    # Request USER token scopes (use user_scope param)
+    user_scopes = [
         "channels:history",
         "channels:read",
         "groups:history",
@@ -56,7 +57,7 @@ def get_oauth_url() -> str:
     return (
         "https://slack.com/oauth/v2/authorize?"
         f"client_id={cfg['client_id']}&"
-        f"scope={','.join(scopes)}&"
+        f"user_scope={','.join(user_scopes)}&"
         f"redirect_uri={cfg['redirect_uri']}"
     )
 
