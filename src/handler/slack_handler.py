@@ -14,7 +14,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 import streamlit as st
 
-from .channel_intelligence import get_channel_intelligence  # NEW import
+from .channel_intelligence import get_channel_intelligence  # Use external module
 
 logger = logging.getLogger(__name__)
 

@@ -325,6 +325,26 @@ def generate_sql_for_schema(schema_name: str, query: str) -> str:
     sql_response = ask_gemini(sql_prompt, "")
     return sql_response.strip()
 
+def _is_slack_authenticated_cached() -> bool:
+    """Cache Slack token validity to avoid repeated auth_test calls on every render."""
+    token = st.session_state.get("slack_token", "")
+    if not token:
+        st.session_state["slack_token_valid"] = False
+        return False
+    now = time.time()
+    last_checked = st.session_state.get("slack_token_checked_at", 0)
+    # Revalidate at most every 30 minutes
+    if st.session_state.get("slack_token_valid") is not None and (now - last_checked) < 1800:
+        return bool(st.session_state.get("slack_token_valid"))
+    valid = False
+    try:
+        valid = is_token_valid(token)
+    except Exception:
+        valid = False
+    st.session_state["slack_token_valid"] = valid
+    st.session_state["slack_token_checked_at"] = now
+    return valid
+
 def main() -> None:
     st.title("Incorta AI Search Assistant Tool")
     st.caption("Searches Slack, Confluence, Docs, Zendesk, Jira, then asks Gemini to synthesize an answer with sources.")
@@ -385,7 +405,7 @@ def main() -> None:
             st.stop()
 
     # Auth gate: require Slack token to search Slack; allow rest to run but show connect if missing
-    if "slack_token" not in st.session_state or not is_token_valid(st.session_state.get("slack_token", "")):
+    if "slack_token" not in st.session_state or not _is_slack_authenticated_cached():
         with st.sidebar:
             st.subheader("Slack Authentication")
             try:
@@ -507,7 +527,7 @@ def main() -> None:
                     data_sources = intent_data.get("data_sources", ["slack", "confluence"])
 
                     # Enforce Slack login: if no valid token, do not search Slack
-                    if ("slack_token" not in st.session_state) or (not is_token_valid(st.session_state.get("slack_token", ""))):
+                    if ("slack_token" not in st.session_state) or (not _is_slack_authenticated_cached()):
                         if "slack" in data_sources:
                             data_sources = [s for s in data_sources if s != "slack"]
                             st.info("Sign in with Slack to search Slack (private and public channels).")
