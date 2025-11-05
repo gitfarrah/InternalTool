@@ -472,206 +472,218 @@ def main() -> None:
     user_input = st.chat_input("Type your question")
 
     if user_input:
-        st.session_state["chat_messages"].append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.write(user_input)
+        try:
+            # Add user message to chat immediately
+            st.session_state["chat_messages"].append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.write(user_input)
+        except Exception as e:
+            logger.error(f"Error adding user message to chat: {e}", exc_info=True)
+            st.error(f"Error processing your message: {e}")
+            st.stop()
 
-        with st.chat_message("assistant"):
-            current_filters = {
-                "channel_hint": (channel_hint or "").strip(),
-                "space_hint": (space_hint or "").strip(),
-            }
-            stored_filters = st.session_state.get("filters", {})
-            filters_changed = current_filters != stored_filters
+        try:
+            with st.chat_message("assistant"):
+                current_filters = {
+                    "channel_hint": (channel_hint or "").strip(),
+                    "space_hint": (space_hint or "").strip(),
+                }
+                stored_filters = st.session_state.get("filters", {})
+                filters_changed = current_filters != stored_filters
 
-            intent_type = ""
-            if "intent_data" in st.session_state:
-                intent_type = st.session_state["intent_data"].get("intent", "")
-            
-            reuse_context = (not auto_refresh) and (not filters_changed) and bool(st.session_state.get("context")) and (intent_type != "latest_message")
+                intent_type = ""
+                if "intent_data" in st.session_state:
+                    intent_type = st.session_state["intent_data"].get("intent", "")
+                
+                reuse_context = (not auto_refresh) and (not filters_changed) and bool(st.session_state.get("context")) and (intent_type != "latest_message")
 
-            if reuse_context:
-                context = st.session_state.get("context") or ""
-                slack_results = st.session_state.get("slack_results") or []
-                conf_results = st.session_state.get("conf_results") or []
-                docs_results = st.session_state.get("docs_results") or []
-                zendesk_results = st.session_state.get("zendesk_results") or {}
-                jira_results = st.session_state.get("jira_results") or {}
-            else:
-                with st.spinner("Analyzing query and retrieving sources..."):
-                    cache_filters = {
-                        "channel_hint": (channel_hint or "").strip(),
-                        "space_hint": (space_hint or "").strip(),
-                    }
-                    
-                    intent_data = get_cached_intent_analysis(user_input, cache_filters)
-                    
-                    if not intent_data:
-                        intent_data = analyze_user_intent(user_input)
-                        intent_data = validate_intent(intent_data)
-                        cache_intent_analysis(user_input, cache_filters, intent_data)
-                    
-                    if channel_hint and channel_hint.strip():
-                        intent_data["slack_params"]["channels"] = channel_hint.strip()
-                    if space_hint and space_hint.strip():
-                        intent_data["confluence_params"]["spaces"] = space_hint.strip()
-
-                    logger.info(f"Intent analysis result: {intent_data}")
-                    
-                    slack_results: List[dict] = []
-                    conf_results: List[dict] = []
-                    docs_results: List[dict] = []
-                    zendesk_results: dict = {}
-                    jira_results: dict = {}
-
-                    data_sources = intent_data.get("data_sources", ["slack", "confluence"])
-
-                    # Enforce Slack login: if no valid token, do not search Slack
-                    if ("slack_token" not in st.session_state) or (not _is_slack_authenticated_cached()):
-                        if "slack" in data_sources:
-                            data_sources = [s for s in data_sources if s != "slack"]
-                            st.info("Sign in with Slack to search Slack (private and public channels).")
-
-                    with ThreadPoolExecutor(max_workers=5) as pool:
-                        futures = {}
-
-                        if "slack" in data_sources:
-                            futures["slack"] = pool.submit(
-                                search_slack_simplified,
-                                user_input,
-                                intent_data,
-                                15,
-                                st.session_state.get("slack_token")
-                            )
+                if reuse_context:
+                    context = st.session_state.get("context") or ""
+                    slack_results = st.session_state.get("slack_results") or []
+                    conf_results = st.session_state.get("conf_results") or []
+                    docs_results = st.session_state.get("docs_results") or []
+                    zendesk_results = st.session_state.get("zendesk_results") or {}
+                    jira_results = st.session_state.get("jira_results") or {}
+                else:
+                    with st.spinner("Analyzing query and retrieving sources..."):
+                        cache_filters = {
+                            "channel_hint": (channel_hint or "").strip(),
+                            "space_hint": (space_hint or "").strip(),
+                        }
                         
-                        if "confluence" in data_sources:
-                            futures["confluence"] = pool.submit(
-                                search_confluence_optimized,
-                                intent_data,
-                                user_input
-                            )
+                        intent_data = get_cached_intent_analysis(user_input, cache_filters)
                         
-                        # Knowledge base (Docs) search: enable for doc-style queries even if not explicitly requested
-                        def _should_search_docs(query: str) -> bool:
-                            q = (query or "").lower()
-                            doc_terms = [
-                                "how to", "install", "installation", "setup", "configure",
-                                "documentation", "doc", "guide", "on prem", "on-prem"
-                            ]
-                            return any(t in q for t in doc_terms)
+                        if not intent_data:
+                            intent_data = analyze_user_intent(user_input)
+                            intent_data = validate_intent(intent_data)
+                            cache_intent_analysis(user_input, cache_filters, intent_data)
+                        
+                        if channel_hint and channel_hint.strip():
+                            intent_data["slack_params"]["channels"] = channel_hint.strip()
+                        if space_hint and space_hint.strip():
+                            intent_data["confluence_params"]["spaces"] = space_hint.strip()
 
-                        if any(s in data_sources for s in ["docs", "knowledge_base"]) or _should_search_docs(user_input):
-                            futures["docs"] = pool.submit(search_docs_plain, user_input, 5)
+                        logger.info(f"Intent analysis result: {intent_data}")
                         
-                        if "zendesk" in data_sources:
-                            zendesk_schema = fetch_schema_details("ZendeskTickets")
-                            zendesk_sql = generate_sql_for_schema("ZendeskTickets", user_input)
-                            if zendesk_sql:
-                                futures["zendesk"] = pool.submit(
-                                    fetch_table_data,
-                                    zendesk_sql
+                        slack_results: List[dict] = []
+                        conf_results: List[dict] = []
+                        docs_results: List[dict] = []
+                        zendesk_results: dict = {}
+                        jira_results: dict = {}
+
+                        data_sources = intent_data.get("data_sources", ["slack", "confluence"])
+
+                        # Enforce Slack login: if no valid token, do not search Slack
+                        if ("slack_token" not in st.session_state) or (not _is_slack_authenticated_cached()):
+                            if "slack" in data_sources:
+                                data_sources = [s for s in data_sources if s != "slack"]
+                                st.info("Sign in with Slack to search Slack (private and public channels).")
+
+                        with ThreadPoolExecutor(max_workers=5) as pool:
+                            futures = {}
+
+                            if "slack" in data_sources:
+                                futures["slack"] = pool.submit(
+                                    search_slack_simplified,
+                                    user_input,
+                                    intent_data,
+                                    15,
+                                    st.session_state.get("slack_token")
                                 )
-                        
-                        if "jira" in data_sources:
-                            jira_schema = fetch_schema_details("Jira_F")
-                            jira_sql = generate_sql_for_schema("Jira_F", user_input)
-                            if jira_sql:
-                                futures["jira"] = pool.submit(
-                                    fetch_table_data,
-                                    jira_sql
+                            
+                            if "confluence" in data_sources:
+                                futures["confluence"] = pool.submit(
+                                    search_confluence_optimized,
+                                    intent_data,
+                                    user_input
                                 )
+                            
+                            # Knowledge base (Docs) search: enable for doc-style queries even if not explicitly requested
+                            def _should_search_docs(query: str) -> bool:
+                                q = (query or "").lower()
+                                doc_terms = [
+                                    "how to", "install", "installation", "setup", "configure",
+                                    "documentation", "doc", "guide", "on prem", "on-prem"
+                                ]
+                                return any(t in q for t in doc_terms)
+
+                            if any(s in data_sources for s in ["docs", "knowledge_base"]) or _should_search_docs(user_input):
+                                futures["docs"] = pool.submit(search_docs_plain, user_input, 5)
+                            
+                            if "zendesk" in data_sources:
+                                zendesk_schema = fetch_schema_details("ZendeskTickets")
+                                zendesk_sql = generate_sql_for_schema("ZendeskTickets", user_input)
+                                if zendesk_sql:
+                                    futures["zendesk"] = pool.submit(
+                                        fetch_table_data,
+                                        zendesk_sql
+                                    )
+                            
+                            if "jira" in data_sources:
+                                jira_schema = fetch_schema_details("Jira_F")
+                                jira_sql = generate_sql_for_schema("Jira_F", user_input)
+                                if jira_sql:
+                                    futures["jira"] = pool.submit(
+                                        fetch_table_data,
+                                        jira_sql
+                                    )
+                            
+                            for source, future in futures.items():
+                                try:
+                                    if source == "slack":
+                                        slack_results = future.result(timeout=75)
+                                    elif source == "confluence":
+                                        conf_results = future.result(timeout=60)
+                                    elif source == "docs":
+                                        docs_results = future.result(timeout=30)
+                                    elif source == "zendesk":
+                                        zendesk_results = future.result(timeout=60)
+                                    elif source == "jira":
+                                        jira_results = future.result(timeout=60)
+                                except Exception as e:
+                                    logger.error(f"{source.title()} search failed: {e}")
+                                    if "timeout" in str(e).lower():
+                                        st.warning(f"⏱️ {source.title()} search timed out.")
+                                    else:
+                                        st.warning(f"⚠️ {source.title()} search encountered an issue: {str(e)}")
+
+                        if not slack_results and not conf_results and not docs_results and not zendesk_results and not jira_results:
+                            nores = "No results found in any source. Try adjusting your query or filters."
+                            st.write(nores)
+                            st.session_state["chat_messages"].append({"role": "assistant", "content": nores})
+                            return
                         
-                        for source, future in futures.items():
-                            try:
-                                if source == "slack":
-                                    slack_results = future.result(timeout=75)
-                                elif source == "confluence":
-                                    conf_results = future.result(timeout=60)
-                                elif source == "docs":
-                                    docs_results = future.result(timeout=30)
-                                elif source == "zendesk":
-                                    zendesk_results = future.result(timeout=60)
-                                elif source == "jira":
-                                    jira_results = future.result(timeout=60)
-                            except Exception as e:
-                                logger.error(f"{source.title()} search failed: {e}")
-                                if "timeout" in str(e).lower():
-                                    st.warning(f"⏱️ {source.title()} search timed out.")
-                                else:
-                                    st.warning(f"⚠️ {source.title()} search encountered an issue: {str(e)}")
+                        context = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                        st.session_state["context"] = context
+                        st.session_state["slack_results"] = slack_results
+                        st.session_state["conf_results"] = conf_results
+                        st.session_state["docs_results"] = docs_results
+                        st.session_state["zendesk_results"] = zendesk_results
+                        st.session_state["jira_results"] = jira_results
+                        st.session_state["filters"] = current_filters
+                        st.session_state["intent_data"] = intent_data
 
-                    if not slack_results and not conf_results and not docs_results and not zendesk_results and not jira_results:
-                        nores = "No results found in any source. Try adjusting your query or filters."
-                        st.write(nores)
-                        st.session_state["chat_messages"].append({"role": "assistant", "content": nores})
-                        return
-                    
-                    context = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                    st.session_state["context"] = context
-                    st.session_state["slack_results"] = slack_results
-                    st.session_state["conf_results"] = conf_results
-                    st.session_state["docs_results"] = docs_results
-                    st.session_state["zendesk_results"] = zendesk_results
-                    st.session_state["jira_results"] = jira_results
-                    st.session_state["filters"] = current_filters
-                    st.session_state["intent_data"] = intent_data
+                preface = ("Previous conversation context (use for continuity):\n" + "\n".join([f"{prefix} {m['content']}" for m in st.session_state["chat_messages"][-6:] if (prefix := "User:" if m["role"] == "user" else "Assistant:")]) + "\n\n") if st.session_state["chat_messages"][-6:] else ""
 
-            preface = ("Previous conversation context (use for continuity):\n" + "\n".join([f"{prefix} {m['content']}" for m in st.session_state["chat_messages"][-6:] if (prefix := "User:" if m["role"] == "user" else "Assistant:")]) + "\n\n") if st.session_state["chat_messages"][-6:] else ""
+                with st.spinner("Thinking..."):
+                    # Generate concise summary only
+                    try:
+                        context_for_summary = context or _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                        summary_prompt = (
+                            "Write a concise 2-4 sentence summary answering the user's question directly. "
+                            "Include what the feature/release is, who is responsible (if available), current status, and key updates.\n\n"
+                            f"User question: {user_input}\n\nContext:\n{context_for_summary}"
+                        )
+                        summary_text = ask_gemini(summary_prompt, "") or ""
+                    except Exception:
+                        summary_text = ""
 
-            with st.spinner("Thinking..."):
-                # Generate concise summary only
+                grouped_output = _format_grouped_response(
+                    summary_text,
+                    slack_results,
+                    conf_results,
+                )
+
+                st.markdown(grouped_output)
+
+                # Agent Trace: log to terminal instead of UI
                 try:
-                    context_for_summary = context or _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                    summary_prompt = (
-                        "Write a concise 2-4 sentence summary answering the user's question directly. "
-                        "Include what the feature/release is, who is responsible (if available), current status, and key updates.\n\n"
-                        f"User question: {user_input}\n\nContext:\n{context_for_summary}"
-                    )
-                    summary_text = ask_gemini(summary_prompt, "") or ""
+                    strategies = [r.get('strategy') for r in (slack_results or []) if r.get('strategy')]
+                    strat_counts = {}
+                    for s in strategies:
+                        strat_counts[s] = strat_counts.get(s, 0) + 1
+                    channels = sorted({r.get('channel') for r in (slack_results or []) if r.get('channel')})
+                    conf_top = ", ".join([c.get('title','') for c in (conf_results or [])[:5]])
+                    docs_top = ", ".join([d.get('title','') for d in (docs_results or [])[:5]])
+                    if strat_counts:
+                        logger.info("Agent Trace: Slack strategies used: " + ", ".join([f"{k} x{v}" for k,v in strat_counts.items()]))
+                    if channels:
+                        logger.info("Agent Trace: Slack channels searched: " + ", ".join([f"#{c}" for c in channels]))
+                    logger.info(f"Agent Trace: Confluence results: {len(conf_results or [])}; Top: {conf_top}")
+                    logger.info(f"Agent Trace: Docs results: {len(docs_results or [])}; Top: {docs_top}")
                 except Exception:
-                    summary_text = ""
+                    pass
 
-            grouped_output = _format_grouped_response(
-                summary_text,
-                slack_results,
-                conf_results,
-            )
+                if slack_results or conf_results or docs_results or zendesk_results or jira_results:
+                    _render_sources(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                
+                st.session_state["chat_messages"].append({"role": "assistant", "content": grouped_output})
 
-            st.markdown(grouped_output)
-
-            # Agent Trace: log to terminal instead of UI
-            try:
-                strategies = [r.get('strategy') for r in (slack_results or []) if r.get('strategy')]
-                strat_counts = {}
-                for s in strategies:
-                    strat_counts[s] = strat_counts.get(s, 0) + 1
-                channels = sorted({r.get('channel') for r in (slack_results or []) if r.get('channel')})
-                conf_top = ", ".join([c.get('title','') for c in (conf_results or [])[:5]])
-                docs_top = ", ".join([d.get('title','') for d in (docs_results or [])[:5]])
-                if strat_counts:
-                    logger.info("Agent Trace: Slack strategies used: " + ", ".join([f"{k} x{v}" for k,v in strat_counts.items()]))
-                if channels:
-                    logger.info("Agent Trace: Slack channels searched: " + ", ".join([f"#{c}" for c in channels]))
-                logger.info(f"Agent Trace: Confluence results: {len(conf_results or [])}; Top: {conf_top}")
-                logger.info(f"Agent Trace: Docs results: {len(docs_results or [])}; Top: {docs_top}")
-            except Exception:
-                pass
-
-            if slack_results or conf_results or docs_results or zendesk_results or jira_results:
-                _render_sources(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-            
-            st.session_state["chat_messages"].append({"role": "assistant", "content": grouped_output})
-
-            new_entry = {
-                "question": user_input.strip(),
-                "channel_hint": (channel_hint or "").strip() or None,
-                "space_hint": (space_hint or "").strip() or None,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            }
-            if not st.session_state["search_history"] or st.session_state["search_history"][0].get("question") != new_entry["question"]:
-                st.session_state["search_history"].insert(0, new_entry)
-                if len(st.session_state["search_history"]) > 50:
-                    st.session_state["search_history"] = st.session_state["search_history"][:50]
+                new_entry = {
+                    "question": user_input.strip(),
+                    "channel_hint": (channel_hint or "").strip() or None,
+                    "space_hint": (space_hint or "").strip() or None,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                }
+                if not st.session_state["search_history"] or st.session_state["search_history"][0].get("question") != new_entry["question"]:
+                    st.session_state["search_history"].insert(0, new_entry)
+                    if len(st.session_state["search_history"]) > 50:
+                        st.session_state["search_history"] = st.session_state["search_history"][:50]
+        except Exception as e:
+            error_msg = f"An error occurred while processing your query: {str(e)}"
+            logger.error(f"Error in chat processing: {e}", exc_info=True)
+            st.error(error_msg)
+            st.session_state["chat_messages"].append({"role": "assistant", "content": error_msg})
 
 if __name__ == "__main__":
     main()
