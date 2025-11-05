@@ -357,64 +357,84 @@ def main() -> None:
 
     if "code" in query_params:
         try:
-            # Validate state to avoid CSRF; if expected missing (e.g., cloud restart), allow once
-            returned_state = query_params.get("state", "")
-            expected_state = st.session_state.get("slack_oauth_state", "")
-            if expected_state and returned_state != expected_state:
-                st.error("❌ Authentication failed: invalid_state. Please try again.")
+            oauth_code = query_params.get("code", "")
+            
+            # Check if we already have a valid token (avoid reprocessing)
+            if st.session_state.get("slack_token") and _is_slack_authenticated_cached():
+                logger.info("Already have valid Slack token, skipping OAuth processing")
                 try:
                     st.query_params.clear()
                 except Exception:
                     pass
-                st.stop()
-
-            # Avoid double-processing the same code
-            if st.session_state.get("slack_oauth_done"):
-                logger.info("OAuth already processed, clearing params and rerunning")
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-                # Ensure chat state exists before rerun
+                # Ensure chat state exists
                 if "chat_messages" not in st.session_state:
                     st.session_state["chat_messages"] = [
                         {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
                     ]
-                st.rerun()
+                # Don't rerun - just continue with normal flow
+            else:
+                # Validate state to avoid CSRF; if expected missing (e.g., cloud restart), allow once
+                returned_state = query_params.get("state", "")
+                expected_state = st.session_state.get("slack_oauth_state", "")
+                if expected_state and returned_state != expected_state:
+                    st.error("❌ Authentication failed: invalid_state. Please try again.")
+                    try:
+                        st.query_params.clear()
+                    except Exception:
+                        pass
+                    st.stop()
 
-            token = exchange_code_for_token(query_params["code"])
-            user_info = get_user_info(token)
-            st.session_state["slack_token"] = token
-            st.session_state["slack_user_name"] = user_info.get("name", "User")
-            st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
-            st.session_state["slack_user_id"] = user_info.get("id", "")
-            st.session_state["slack_oauth_done"] = True
-            
-            # Ensure chat_messages exists after OAuth (might be lost during redirect)
-            if "chat_messages" not in st.session_state:
-                st.session_state["chat_messages"] = [
-                    {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-                ]
-                logger.info("Reinitialized chat_messages after OAuth")
-            
-            logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
-            logger.info(f"Chat messages after OAuth: {len(st.session_state.get('chat_messages', []))} messages")
-            
-            # Clear URL params
-            try:
-                st.query_params.clear()
-            except Exception:
-                pass
-            
-            st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
-            
-            # Reset oauth_done flag and rerun to reload the page cleanly
-            st.session_state["slack_oauth_done"] = False
-            st.rerun()
+                # Check if this code was already processed
+                processed_code = st.session_state.get("processed_oauth_code", "")
+                if processed_code == oauth_code:
+                    logger.info("OAuth code already processed, clearing params and continuing")
+                    try:
+                        st.query_params.clear()
+                    except Exception:
+                        pass
+                    # Ensure chat state exists
+                    if "chat_messages" not in st.session_state:
+                        st.session_state["chat_messages"] = [
+                            {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+                        ]
+                    # Continue without rerun
+                else:
+                    # Process the OAuth code
+                    logger.info("Processing OAuth code...")
+                    token = exchange_code_for_token(oauth_code)
+                    user_info = get_user_info(token)
+                    st.session_state["slack_token"] = token
+                    st.session_state["slack_user_name"] = user_info.get("name", "User")
+                    st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
+                    st.session_state["slack_user_id"] = user_info.get("id", "")
+                    st.session_state["processed_oauth_code"] = oauth_code  # Mark code as processed
+                    
+                    # Ensure chat_messages exists after OAuth
+                    if "chat_messages" not in st.session_state:
+                        st.session_state["chat_messages"] = [
+                            {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+                        ]
+                        logger.info("Reinitialized chat_messages after OAuth")
+                    
+                    logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
+                    logger.info(f"Chat messages after OAuth: {len(st.session_state.get('chat_messages', []))} messages")
+                    
+                    # Clear URL params BEFORE showing success message
+                    try:
+                        st.query_params.clear()
+                    except Exception:
+                        pass
+                    
+                    st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
+                    # Rerun to reload page without OAuth params
+                    st.rerun()
         except Exception as e:
             msg = str(e)
             logger.error(f"OAuth error: {msg}", exc_info=True)
-            if "invalid_code" in msg:
+            if "invalid_code" in msg.lower() or "already_used" in msg.lower():
+                # Clear the processed code flag so user can try again
+                if "processed_oauth_code" in st.session_state:
+                    del st.session_state["processed_oauth_code"]
                 st.warning("OAuth code expired or already used. Please click Connect to Slack again.")
                 try:
                     st.query_params.clear()
@@ -422,10 +442,14 @@ def main() -> None:
                     pass
                 if "slack_oauth_state" in st.session_state:
                     del st.session_state["slack_oauth_state"]
-                st.stop()
-            st.error(f"❌ Authentication failed: {msg}")
-            logger.error(f"OAuth authentication failed: {msg}", exc_info=True)
-            st.stop()
+                # Don't stop - allow user to continue
+            else:
+                st.error(f"❌ Authentication failed: {msg}")
+                logger.error(f"OAuth authentication failed: {msg}", exc_info=True)
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
 
     # Auth gate: require Slack token to search Slack; allow rest to run but show connect if missing
     if "slack_token" not in st.session_state or not _is_slack_authenticated_cached():
