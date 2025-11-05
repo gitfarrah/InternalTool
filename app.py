@@ -739,28 +739,63 @@ def main() -> None:
                         
                         # Add Knowledge Base passages
                         for doc in (docs_results or [])[:10]:
-                            # Handle Qdrant result format
+                            # search_docs_plain returns formatted dicts with title, url, text, score, source
+                            # Handle both Qdrant ScoredPoint format and pre-formatted dict format
                             if hasattr(doc, 'payload'):
+                                # Qdrant ScoredPoint object
                                 payload = doc.payload
+                                text = str(payload.get('text', '') or payload.get('content', '') or '').strip()
+                                title = str(payload.get('title', 'Untitled') or 'Untitled')
+                                url = str(payload.get('url', '') or '')
+                                score = doc.score if hasattr(doc, 'score') else 0.0
                             elif isinstance(doc, dict):
-                                payload = doc.get('payload', doc)
+                                # Pre-formatted dict from search_docs_plain
+                                text = str(doc.get('text', '') or doc.get('content', '') or '').strip()
+                                title = str(doc.get('title', 'Untitled') or 'Untitled')
+                                url = str(doc.get('url', '') or '')
+                                score = doc.get('score', 0.0)
                             else:
-                                payload = {}
+                                text = ''
+                                title = 'Untitled'
+                                url = ''
+                                score = 0.0
                             
-                            passages.append({
-                                "source": "knowledge_base",
-                                "text": payload.get('text', '') or payload.get('content', ''),
-                                "title": payload.get('title', 'Untitled'),
-                                "url": payload.get('url', ''),
-                                "score": payload.get('score', 0.0) if isinstance(payload, dict) else (doc.score if hasattr(doc, 'score') else 0.0)
-                            })
+                            # Only add passage if it has text content (minimum 10 chars to avoid empty snippets)
+                            if text and len(text.strip()) >= 10:
+                                passages.append({
+                                    "source": "knowledge_base",
+                                    "text": text,
+                                    "title": title,
+                                    "url": url,
+                                    "score": score
+                                })
+                            else:
+                                logger.debug(f"Skipping Knowledge Base doc '{title}' - no text content (length: {len(text) if text else 0})")
+                        
+                        # Log passage count for debugging
+                        logger.info(f"Prepared {len(passages)} passages for answer generation")
+                        logger.info(f"Passage sources: {[p.get('source', 'unknown') for p in passages[:5]]}")
                         
                         # Use answer_with_citations for structured response with source mentions
-                        answer_result = answer_with_citations(user_input, passages)
-                        
-                        if answer_result and answer_result.get("exists"):
-                            summary_text = answer_result.get("answer", "")
+                        if passages:
+                            answer_result = answer_with_citations(user_input, passages)
+                            
+                            if answer_result and answer_result.get("exists"):
+                                summary_text = answer_result.get("answer", "")
+                                logger.info("Generated answer with citations successfully")
+                            else:
+                                # If answer_with_citations failed, try fallback with better prompt
+                                logger.warning(f"answer_with_citations returned exists=false. Attempting fallback...")
+                                context_for_summary = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                                summary_prompt = (
+                                    "Based on the provided context, write a comprehensive answer to the user's question. "
+                                    "Begin by mentioning the source (e.g., 'According to the documentation...' or 'Based on Slack discussions...'). "
+                                    "For installation or step-by-step queries, provide clear numbered steps with headings.\n\n"
+                                    f"User question: {user_input}\n\nContext:\n{context_for_summary}"
+                                )
+                                summary_text = ask_gemini(summary_prompt, "") or "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
                         else:
+                            logger.warning("No passages prepared - cannot generate answer")
                             summary_text = "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
                     except Exception as e:
                         logger.error(f"Error generating structured answer: {e}", exc_info=True)

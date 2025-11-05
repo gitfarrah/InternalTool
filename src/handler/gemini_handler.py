@@ -235,13 +235,24 @@ def build_user_payload(query: str, passages: List[dict], max_chars_per_passage: 
     """
     blocks = []
     for p in passages:
-        snippet = (p.get("text") or p.get("excerpt") or "")[:max_chars_per_passage]
-        blocks.append({
-            "title": p.get("title", ""),
-            "url": p.get("url", ""),
-            "snippet": snippet,
-            "source": p.get("source", "unknown")
-        })
+        snippet = (p.get("text") or p.get("excerpt") or "").strip()
+        if snippet:
+            # Truncate if too long
+            if len(snippet) > max_chars_per_passage:
+                snippet = snippet[:max_chars_per_passage] + "..."
+            blocks.append({
+                "title": p.get("title", ""),
+                "url": p.get("url", ""),
+                "snippet": snippet,
+                "source": p.get("source", "unknown")
+            })
+    
+    # Log if we have no valid passages
+    if not blocks:
+        logger.warning(f"No valid passages with text content found. Total passages: {len(passages)}")
+        for i, p in enumerate(passages[:3]):
+            logger.warning(f"Passage {i}: keys={list(p.keys())}, has_text={bool(p.get('text') or p.get('excerpt'))}")
+    
     return json.dumps({"query": query, "passages": blocks}, ensure_ascii=False)
 
 
