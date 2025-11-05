@@ -1,3 +1,11 @@
+import os
+import sys
+
+# Ensure project root is on sys.path for package imports on all platforms
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from __future__ import annotations
 
 import logging
