@@ -329,13 +329,13 @@ def main() -> None:
 
     if "code" in query_params:
         try:
-            # Validate state to avoid CSRF and code reuse issues
+            # Validate state to avoid CSRF; if expected missing (e.g., cloud restart), allow once
             returned_state = query_params.get("state", "")
             expected_state = st.session_state.get("slack_oauth_state", "")
-            if not returned_state or (expected_state and returned_state != expected_state):
+            if expected_state and returned_state != expected_state:
                 st.error("❌ Authentication failed: invalid_state. Please try again.")
                 try:
-                    st.query_params.clear()
+                    st.experimental_set_query_params()
                 except Exception:
                     pass
                 st.stop()
@@ -343,7 +343,7 @@ def main() -> None:
             # Avoid double-processing the same code
             if st.session_state.get("slack_oauth_done"):
                 try:
-                    st.query_params.clear()
+                    st.experimental_set_query_params()
                 except Exception:
                     pass
                 st.rerun()
@@ -357,7 +357,7 @@ def main() -> None:
             st.session_state["slack_oauth_done"] = True
             # Clear URL params and rerun
             try:
-                st.query_params.clear()
+                st.experimental_set_query_params()
             except Exception:
                 pass
             st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
@@ -367,10 +367,9 @@ def main() -> None:
             if "invalid_code" in msg:
                 st.warning("OAuth code expired or already used. Please click Connect to Slack again.")
                 try:
-                    st.query_params.clear()
+                    st.experimental_set_query_params()
                 except Exception:
                     pass
-                # Reset state so we can retry
                 if "slack_oauth_state" in st.session_state:
                     del st.session_state["slack_oauth_state"]
                 st.stop()
@@ -385,18 +384,6 @@ def main() -> None:
                 oauth_url = get_oauth_url()
                 st.link_button("🔗 Connect to Slack", oauth_url, use_container_width=True)
                 st.caption("You'll be redirected to Slack to authorize, then back here.")
-
-                # Auto-redirect once on first visit to streamline login
-                if not st.session_state.get("oauth_redirect_attempted"):
-                    st.session_state["oauth_redirect_attempted"] = True
-                    st.markdown(
-                        f"""
-                        <script>
-                        setTimeout(function() {{ window.location.href = "{oauth_url}"; }}, 500);
-                        </script>
-                        """,
-                        unsafe_allow_html=True,
-                    )
             except Exception:
                 st.info("To enable Slack login, set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and SLACK_REDIRECT_URI in st.secrets or environment.")
 
