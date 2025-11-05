@@ -18,7 +18,7 @@ from datetime import datetime
 import streamlit as st
 
 from src.handler.confluence_handler import search_confluence_optimized
-from src.handler.gemini_handler import ask_gemini
+from src.handler.gemini_handler import ask_gemini, answer_with_citations
 from src.handler.intent_analyzer import analyze_user_intent, validate_intent
 from src.handler.slack_handler import search_slack_simplified
 from src.storage.cache_manager import (
@@ -219,13 +219,17 @@ def _render_sources(slack_messages: List[dict], confluence_pages: List[dict], do
                 timestamp = m.get('date', m.get('ts', ''))
                 text = _clean_slack_text(m.get('text', '').strip())
                 permalink = m.get('permalink', '')
+                relevance_score = m.get('relevance_score', 0.0)
                 import html
                 text_escaped = html.escape(text)
                 st.markdown(f"""
                 <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #4A90E2;">
                     <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
                         <span style="font-weight: 600; color: #1f1f1f;">#{channel}</span>
-                        <span style="color: #666; font-size: 0.9em;">{timestamp}</span>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <span style="color: #666; font-size: 0.9em;">{timestamp}</span>
+                            <span style="color: #888; font-size: 0.9em;">Score: {relevance_score:.2f}</span>
+                        </div>
                     </div>
                     <div style="color: #4A90E2; font-size: 0.9em; margin-bottom: 10px;">@{username}</div>
                     <div style="color: #1f1f1f; line-height: 1.6; margin-bottom: 10px; white-space: pre-wrap;">{text_escaped}</div>
@@ -708,17 +712,70 @@ def main() -> None:
                 preface = ("Previous conversation context (use for continuity):\n" + "\n".join([f"{prefix} {m['content']}" for m in st.session_state["chat_messages"][-6:] if (prefix := "User:" if m["role"] == "user" else "Assistant:")]) + "\n\n") if st.session_state["chat_messages"][-6:] else ""
 
                 with st.spinner("Thinking..."):
-                    # Generate concise summary only
+                    # Generate structured answer with citations
                     try:
-                        context_for_summary = context or _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                        summary_prompt = (
-                            "Write a concise 2-4 sentence summary answering the user's question directly. "
-                            "Include what the feature/release is, who is responsible (if available), current status, and key updates.\n\n"
-                            f"User question: {user_input}\n\nContext:\n{context_for_summary}"
-                        )
-                        summary_text = ask_gemini(summary_prompt, "") or ""
-                    except Exception:
-                        summary_text = ""
+                        # Prepare passages for citation-based answer
+                        passages = []
+                        
+                        # Add Slack passages
+                        for msg in (slack_results or [])[:10]:
+                            passages.append({
+                                "source": "slack",
+                                "text": _clean_slack_text(msg.get('text', '')),
+                                "title": f"#{msg.get('channel', 'unknown')} - @{msg.get('username', 'unknown')}",
+                                "url": msg.get('permalink', ''),
+                                "timestamp": msg.get('date', '')
+                            })
+                        
+                        # Add Confluence passages
+                        for page in (conf_results or [])[:10]:
+                            passages.append({
+                                "source": "confluence",
+                                "text": page.get('excerpt', ''),
+                                "title": page.get('title', 'Untitled'),
+                                "url": page.get('url', ''),
+                                "space": page.get('space', '')
+                            })
+                        
+                        # Add Knowledge Base passages
+                        for doc in (docs_results or [])[:10]:
+                            # Handle Qdrant result format
+                            if hasattr(doc, 'payload'):
+                                payload = doc.payload
+                            elif isinstance(doc, dict):
+                                payload = doc.get('payload', doc)
+                            else:
+                                payload = {}
+                            
+                            passages.append({
+                                "source": "knowledge_base",
+                                "text": payload.get('text', '') or payload.get('content', ''),
+                                "title": payload.get('title', 'Untitled'),
+                                "url": payload.get('url', ''),
+                                "score": payload.get('score', 0.0) if isinstance(payload, dict) else (doc.score if hasattr(doc, 'score') else 0.0)
+                            })
+                        
+                        # Use answer_with_citations for structured response with source mentions
+                        answer_result = answer_with_citations(user_input, passages)
+                        
+                        if answer_result and answer_result.get("exists"):
+                            summary_text = answer_result.get("answer", "")
+                        else:
+                            summary_text = "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
+                    except Exception as e:
+                        logger.error(f"Error generating structured answer: {e}", exc_info=True)
+                        # Fallback to simple summary
+                        try:
+                            context_for_summary = context or _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                            summary_prompt = (
+                                "Write a concise answer answering the user's question directly. "
+                                "Begin by mentioning the source (e.g., 'According to the documentation...' or 'Based on Slack discussions...'). "
+                                "For installation or step-by-step queries, provide clear numbered steps with headings.\n\n"
+                                f"User question: {user_input}\n\nContext:\n{context_for_summary}"
+                            )
+                            summary_text = ask_gemini(summary_prompt, "") or ""
+                        except Exception:
+                            summary_text = "An error occurred while generating the answer. Please try again."
 
                 grouped_output = _format_grouped_response(
                     summary_text,

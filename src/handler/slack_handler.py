@@ -1301,13 +1301,15 @@ def _rank_results(
         logger.info(f"   Preview: {text_preview}...")
     logger.info("=" * 80)
     
-    # Remove internal scoring fields from final results
+    # Remove internal scoring fields but preserve final_score for UI display
     final_results = []
     for score, result in scored_results:
-        # Clean up internal fields but keep useful metadata
+        # Clean up internal fields but keep final_score for display
         result.pop("semantic_score", None)
         result.pop("slack_score", None)
         result.pop("thread_relevance_score", None)
+        # Store final relevance score for UI display
+        result["relevance_score"] = round(score, 2)
         # Keep: is_thread_reply, thread_ts for UI display if needed
         final_results.append(result)
     

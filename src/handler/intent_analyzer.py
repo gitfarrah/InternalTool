@@ -255,6 +255,22 @@ def analyze_user_intent(
     # Step 2: Extract smart keywords
     smart_keywords = extract_keywords_smart(user_query)
     
+    # Step 2.5: Detect explicit source mentions in query and prioritize them
+    query_lower = user_query.lower()
+    detected_sources = []
+    source_priority_map = {
+        "slack": ["slack", "in slack", "from slack"],
+        "confluence": ["confluence", "in confluence", "from confluence"],
+        "knowledge_base": ["documentation", "docs", "doc", "knowledge base", "kb", "guide", "manual", "on prem", "on-prem", "installation guide"],
+        "zendesk": ["zendesk", "ticket", "tickets", "support ticket"],
+        "jira": ["jira", "issue", "issues", "jira ticket"]
+    }
+    
+    for source, keywords in source_priority_map.items():
+        if any(keyword in query_lower for keyword in keywords):
+            detected_sources.append(source)
+            logger.info(f"Detected source mention in query: {source}")
+    
     # If it's a follow-up, we might not need full intent analysis
     if query_type_info["query_type"] == "follow_up" and last_context:
         return {
@@ -287,20 +303,26 @@ def analyze_user_intent(
             for msg in recent_messages
         ]) + "\n\n"
     
+    # Build source priority instructions
+    source_priority_note = ""
+    if detected_sources:
+        source_priority_note = f"\n\n⚠️ IMPORTANT: User explicitly mentioned these sources: {', '.join(detected_sources)}. Prioritize these sources in data_sources and increase their result limits."
+    
     prompt = f"""
 You are an AI assistant that analyzes user queries to extract search parameters for Slack and Confluence.
 
 {context_summary}Current Query: "{user_query}"
 
 Smart Keywords Already Extracted: {smart_keywords}
+{source_priority_note}
 
 Analyze this query and return a JSON response with the following structure:
 
 {{
-    "intent": "latest_message|search_messages|mixed_search|confluence_only|slack_only|follow_up",
+    "intent": "latest_message|search_messages|mixed_search|confluence_only|slack_only|follow_up|docs_only",
     "query_type": "{query_type_info['query_type']}",
     "needs_fresh_data": {str(query_type_info['needs_fresh_data']).lower()},
-    "data_sources": ["slack", "confluence"],
+    "data_sources": ["slack", "confluence", "knowledge_base"],
     "slack_params": {{
         "channels": "all|specific_channel_name|list_of_channels",
         "time_range": "all",
@@ -335,7 +357,15 @@ Intent Types:
 - "mixed_search": Information could be in both Slack and Confluence
 - "confluence_only": Documentation/knowledge base content
 - "slack_only": Discussions/announcements
+- "docs_only": User explicitly wants documentation/knowledge base only
 - "follow_up": Clarification on previous response
+
+Source Detection:
+- If user mentions "slack", "in slack", "from slack" → prioritize slack_only or set slack limit higher
+- If user mentions "confluence" → prioritize confluence_only or set confluence limit higher  
+- If user mentions "documentation", "docs", "doc", "guide", "manual", "installation" → prioritize docs_only or knowledge_base with higher limit
+- If user mentions "zendesk" or "ticket" → include zendesk in data_sources
+- If user mentions "jira" or "issue" → include jira in data_sources
 
 Search Strategies:
 - "exact_match": For technical terms, IDs, versions (use priority_terms)
@@ -414,6 +444,26 @@ Return ONLY the JSON response.
             # Deduplicate and combine
             intent_data["slack_params"]["keywords"] = list(set(slack_kw + smart_keywords))
             intent_data["confluence_params"]["keywords"] = list(set(conf_kw + smart_keywords))
+        
+        # Apply source priority if user explicitly mentioned sources
+        if detected_sources:
+            # Prioritize detected sources in data_sources list
+            current_sources = intent_data.get("data_sources", ["slack", "confluence"])
+            # Move detected sources to front
+            prioritized_sources = detected_sources + [s for s in current_sources if s not in detected_sources]
+            intent_data["data_sources"] = prioritized_sources
+            
+            # Increase limits for prioritized sources
+            for source in detected_sources:
+                if source == "slack":
+                    intent_data["slack_params"]["limit"] = max(intent_data.get("slack_params", {}).get("limit", 15), 20)
+                elif source == "confluence":
+                    intent_data["confluence_params"]["limit"] = max(intent_data.get("confluence_params", {}).get("limit", 10), 15)
+                elif source == "knowledge_base":
+                    # Knowledge base limit is handled in search_docs_plain
+                    intent_data["data_sources"] = list(set(intent_data["data_sources"] + ["knowledge_base", "docs"]))
+            
+            logger.info(f"Applied source priority: {detected_sources} - Updated data_sources: {intent_data['data_sources']}")
         
         # Add query type info
         intent_data["query_type"] = query_type_info["query_type"]
