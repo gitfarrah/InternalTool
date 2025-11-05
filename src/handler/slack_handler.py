@@ -1246,8 +1246,19 @@ def _calculate_final_score(
             if alt_version in text:
                 version_boost = max(version_boost, VERSION_BOOST_ALT)
     
-    # Apply the enhanced formula with thread awareness
-    base_score = (RANKING_ALPHA * semantic_score) + (RANKING_BETA * slack_score) + (RANKING_GAMMA * thread_score)
+    # Normalize semantic_score and thread_score to 0-1 range for consistent scoring
+    # Semantic scores can range from 0 to ~100+ (sum of all SCORE_* constants)
+    # Thread scores can range from 0 to ~80+ (sum of all SCORE_THREAD_* constants)
+    # We'll normalize them to 0-1 using reasonable max values
+    max_semantic_score = 100.0  # Approximate max based on SCORE_* constants
+    max_thread_score = 80.0     # Approximate max based on SCORE_THREAD_* constants
+    
+    normalized_semantic = min(semantic_score / max_semantic_score, 1.0)
+    normalized_thread = min(thread_score / max_thread_score, 1.0) if thread_score > 0 else 0.0
+    
+    # Apply the enhanced formula with thread awareness (using normalized scores)
+    # This ensures base_score stays in 0-1 range before boosts
+    base_score = (RANKING_ALPHA * normalized_semantic) + (RANKING_BETA * slack_score) + (RANKING_GAMMA * normalized_thread)
     final_score = base_score * adaptive_boost * version_boost
     
     # Log relevance score breakdown for debugging
