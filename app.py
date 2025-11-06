@@ -898,7 +898,7 @@ def main() -> None:
                                     elif source == "docs":
                                         docs_results = future.result(timeout=30)
                                     elif source == "zendesk":
-                                        zendesk_results = future.result(timeout=60)
+                                        zendesk_results = future.result(timeout=130)  # Increased timeout to match SQL query timeout (120s) + buffer
                                         logger.info(f"Zendesk search completed. Results: {type(zendesk_results)}, Keys: {list(zendesk_results.keys()) if isinstance(zendesk_results, dict) else 'N/A'}")
                                         if isinstance(zendesk_results, dict) and 'error' in zendesk_results:
                                             logger.error(f"Zendesk search returned error: {zendesk_results.get('error')}")
@@ -907,7 +907,7 @@ def main() -> None:
                                             rows = data.get('rows', []) if isinstance(data, dict) else []
                                             logger.info(f"Zendesk search returned {len(rows)} rows")
                                     elif source == "jira":
-                                        jira_results = future.result(timeout=60)
+                                        jira_results = future.result(timeout=130)  # Increased timeout to match SQL query timeout (120s) + buffer
                                         logger.info(f"Jira search completed. Results: {type(jira_results)}, Keys: {list(jira_results.keys()) if isinstance(jira_results, dict) else 'N/A'}")
                                         if isinstance(jira_results, dict) and 'error' in jira_results:
                                             logger.error(f"Jira search returned error: {jira_results.get('error')}")

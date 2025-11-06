@@ -377,7 +377,10 @@ def fetch_table_data(spark_sql: str) -> dict:
         
         params = {"sql": spark_sql}
         logger.info(f"Full SQL query being executed: {spark_sql}")
-        response = requests.post(url, headers=headers, json=params, verify=True, timeout=60)
+        
+        # Use longer timeout for SQL queries (120 seconds) as they may take time to execute
+        # Also set connect timeout separately to fail fast on connection issues
+        response = requests.post(url, headers=headers, json=params, verify=True, timeout=(10, 120))
         
         if response.status_code == 200:
             result_data = response.json()
@@ -416,6 +419,12 @@ def fetch_table_data(spark_sql: str) -> dict:
             logger.error(f"SQL query execution failed with status {response.status_code}: {error_text}")
             return {"error": f"Failed to fetch data: {response.status_code} - {error_text}"}
     
+    except requests.exceptions.Timeout as e:
+        logger.error(f"SQL query execution timed out after 120 seconds: {e}")
+        return {"error": f"Query execution timed out. The query may be too complex or the database is slow. Try simplifying the query or checking database performance."}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error while executing SQL query: {e}")
+        return {"error": f"Network error: {str(e)}"}
     except Exception as e:
         logger.error(f"Failed to fetch table data: {e}")
         return {"error": f"Exception: {str(e)}"}
