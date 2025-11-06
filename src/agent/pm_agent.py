@@ -301,6 +301,21 @@ def fetch_schema_details(schema_name: str) -> dict:
     Returns:
         Data from the table including columns and rows."""
 )
+def _extract_column_names_from_sql(sql: str) -> list:
+    """Extract column names from a SELECT SQL query."""
+    import re
+    # Match SELECT ... FROM pattern
+    match = re.search(r'SELECT\s+(.+?)\s+FROM', sql, re.IGNORECASE)
+    if match:
+        columns_str = match.group(1).strip()
+        # Split by comma and clean up
+        columns = [col.strip().split()[-1].strip('`"\'') for col in columns_str.split(',')]
+        # Remove 'AS alias' if present
+        columns = [col.split(' AS ')[-1].strip().split()[-1].strip('`"\'') for col in columns]
+        return columns
+    return []
+
+
 def fetch_table_data(spark_sql: str) -> dict:
     """Fetch table data from the Incorta environment."""
     # Log the SQL query being executed
@@ -400,19 +415,62 @@ def fetch_table_data(spark_sql: str) -> dict:
                 if isinstance(actual_data, dict):
                     # Standard structure: {columns: [...], rows: [...]}
                     columns = actual_data.get("columns", [])
-                    rows = actual_data.get("rows", [])
+                    raw_rows = actual_data.get("rows", [])
+                    
+                    # Process rows - they might be in [{'value': ...}, {'value': ...}] format
+                    rows = []
+                    for row in raw_rows:
+                        if isinstance(row, list):
+                            # Row is a list - could be [{'value': ...}, {'value': ...}] or plain values
+                            processed_row = []
+                            for cell in row:
+                                if isinstance(cell, dict) and 'value' in cell:
+                                    # Extract value from {'value': ...} format
+                                    processed_row.append(cell['value'])
+                                else:
+                                    processed_row.append(cell)
+                            rows.append(processed_row)
+                        else:
+                            rows.append(row)
                 elif isinstance(actual_data, list):
                     # If data is a list, it might be rows directly
                     # Try to get columns from metadata or infer from first row
                     if result_data.get("metadata") and isinstance(result_data["metadata"], dict):
                         columns = result_data["metadata"].get("columns", [])
-                    # If no columns in metadata, try to infer from first row
-                    if not columns and len(actual_data) > 0 and isinstance(actual_data[0], (list, dict)):
-                        if isinstance(actual_data[0], list):
-                            columns = [f"col_{i}" for i in range(len(actual_data[0]))]
-                        elif isinstance(actual_data[0], dict):
-                            columns = list(actual_data[0].keys())
-                    rows = actual_data
+                    
+                    # Process rows - they might be in different formats
+                    processed_rows = []
+                    for row in actual_data:
+                        if isinstance(row, list):
+                            # Row is a list - could be [{'value': ...}, {'value': ...}] or plain values
+                            processed_row = []
+                            for cell in row:
+                                if isinstance(cell, dict) and 'value' in cell:
+                                    # Extract value from {'value': ...} format
+                                    processed_row.append(cell['value'])
+                                else:
+                                    processed_row.append(cell)
+                            processed_rows.append(processed_row)
+                        elif isinstance(row, dict):
+                            # Row is a dict - convert to list of values
+                            processed_rows.append(list(row.values()))
+                        else:
+                            processed_rows.append(row)
+                    
+                    # If no columns in metadata, try to infer from first row or SQL query
+                    if not columns and len(processed_rows) > 0:
+                        if isinstance(processed_rows[0], list):
+                            # Try to extract column names from SQL query
+                            sql_columns = _extract_column_names_from_sql(spark_sql)
+                            if sql_columns and len(sql_columns) == len(processed_rows[0]):
+                                columns = sql_columns
+                            else:
+                                # Fallback to generic names
+                                columns = [f"col_{i}" for i in range(len(processed_rows[0]))]
+                        elif isinstance(processed_rows[0], dict):
+                            columns = list(processed_rows[0].keys())
+                    
+                    rows = processed_rows
                 else:
                     # If data is not a dict or list, try top-level
                     columns = result_data.get("columns", [])
