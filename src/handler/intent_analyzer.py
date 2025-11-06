@@ -255,21 +255,51 @@ def analyze_user_intent(
     # Step 2: Extract smart keywords
     smart_keywords = extract_keywords_smart(user_query)
     
-    # Step 2.5: Detect explicit source mentions in query and prioritize them
+    # Step 2.5: Dynamically detect source mentions and prioritize them based on query content
     query_lower = user_query.lower()
     detected_sources = []
-    source_priority_map = {
-        "slack": ["slack", "in slack", "from slack"],
-        "confluence": ["confluence", "in confluence", "from confluence"],
-        "knowledge_base": ["documentation", "docs", "doc", "knowledge base", "kb", "guide", "manual", "on prem", "on-prem", "installation guide"],
-        "zendesk": ["zendesk", "ticket", "tickets", "support ticket"],
-        "jira": ["jira", "issue", "issues", "jira ticket"]
-    }
     
-    for source, keywords in source_priority_map.items():
-        if any(keyword in query_lower for keyword in keywords):
-            detected_sources.append(source)
-            logger.info(f"Detected source mention in query: {source}")
+    # Dynamic source detection based on query patterns (not hard-coded terms)
+    # Detect ticket-related queries (dynamic pattern matching)
+    ticket_patterns = ["ticket", "tickets", "support", "customer issue", "bug report", "problem report"]
+    if any(pattern in query_lower for pattern in ticket_patterns):
+        detected_sources.append("zendesk")
+        logger.info("Detected ticket-related query - prioritizing Zendesk")
+    
+    # Detect Slack mentions
+    slack_patterns = ["slack", "in slack", "from slack", "slack message", "slack discussion"]
+    if any(pattern in query_lower for pattern in slack_patterns):
+        detected_sources.append("slack")
+        logger.info("Detected Slack mention - prioritizing Slack")
+    
+    # Detect Confluence mentions
+    confluence_patterns = ["confluence", "in confluence", "from confluence", "wiki", "documentation page"]
+    if any(pattern in query_lower for pattern in confluence_patterns):
+        detected_sources.append("confluence")
+        logger.info("Detected Confluence mention - prioritizing Confluence")
+    
+    # Detect documentation/knowledge base mentions
+    docs_patterns = ["documentation", "docs", "doc", "knowledge base", "kb", "guide", "manual", "installation guide"]
+    if any(pattern in query_lower for pattern in docs_patterns):
+        detected_sources.append("knowledge_base")
+        logger.info("Detected documentation mention - prioritizing Knowledge Base")
+    
+    # Detect Jira mentions
+    jira_patterns = ["jira", "issue", "issues", "jira ticket", "bug", "feature request"]
+    if any(pattern in query_lower for pattern in jira_patterns):
+        detected_sources.append("jira")
+        logger.info("Detected Jira mention - prioritizing Jira")
+    
+    # Also check for explicit source names
+    if "zendesk" in query_lower:
+        if "zendesk" not in detected_sources:
+            detected_sources.append("zendesk")
+    if "slack" in query_lower and "slack" not in detected_sources:
+        detected_sources.append("slack")
+    if "confluence" in query_lower and "confluence" not in detected_sources:
+        detected_sources.append("confluence")
+    if "jira" in query_lower and "jira" not in detected_sources:
+        detected_sources.append("jira")
     
     # If it's a follow-up, we might not need full intent analysis
     if query_type_info["query_type"] == "follow_up" and last_context:
@@ -447,23 +477,34 @@ Return ONLY the JSON response.
         
         # Apply source priority if user explicitly mentioned sources
         if detected_sources:
-            # Prioritize detected sources in data_sources list
-            current_sources = intent_data.get("data_sources", ["slack", "confluence"])
-            # Move detected sources to front
+            # Prioritize detected sources in data_sources list (move to front for highest priority)
+            current_sources = intent_data.get("data_sources", ["slack", "confluence", "knowledge_base"])
+            # Move detected sources to front - first detected source gets highest priority
             prioritized_sources = detected_sources + [s for s in current_sources if s not in detected_sources]
             intent_data["data_sources"] = prioritized_sources
             
-            # Increase limits for prioritized sources
-            for source in detected_sources:
+            # Increase limits for prioritized sources (highest priority source gets most results)
+            for idx, source in enumerate(detected_sources):
+                priority_multiplier = 2.0 if idx == 0 else 1.5  # First source gets 2x, others get 1.5x
                 if source == "slack":
-                    intent_data["slack_params"]["limit"] = max(intent_data.get("slack_params", {}).get("limit", 15), 20)
+                    base_limit = intent_data.get("slack_params", {}).get("limit", 15)
+                    intent_data["slack_params"]["limit"] = int(base_limit * priority_multiplier)
                 elif source == "confluence":
-                    intent_data["confluence_params"]["limit"] = max(intent_data.get("confluence_params", {}).get("limit", 10), 15)
+                    base_limit = intent_data.get("confluence_params", {}).get("limit", 10)
+                    intent_data["confluence_params"]["limit"] = int(base_limit * priority_multiplier)
                 elif source == "knowledge_base":
                     # Knowledge base limit is handled in search_docs_plain
                     intent_data["data_sources"] = list(set(intent_data["data_sources"] + ["knowledge_base", "docs"]))
+                elif source == "zendesk":
+                    # Ensure zendesk is in data_sources
+                    if "zendesk" not in intent_data["data_sources"]:
+                        intent_data["data_sources"].append("zendesk")
+                elif source == "jira":
+                    # Ensure jira is in data_sources
+                    if "jira" not in intent_data["data_sources"]:
+                        intent_data["data_sources"].append("jira")
             
-            logger.info(f"Applied source priority: {detected_sources} - Updated data_sources: {intent_data['data_sources']}")
+            logger.info(f"Applied dynamic source priority: {detected_sources} - Updated data_sources: {intent_data['data_sources']}")
         
         # Add query type info
         intent_data["query_type"] = query_type_info["query_type"]

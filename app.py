@@ -346,26 +346,48 @@ def generate_sql_for_schema(schema_name: str, query: str) -> str:
     
     schema_json = json.dumps(schema_data, indent=2)
     
+    # Detect ticket ID in query (dynamic pattern matching)
+    import re
+    ticket_id_pattern = r'\b\d{4,}\b'  # Match 4+ digit numbers (likely ticket IDs)
+    ticket_ids = re.findall(ticket_id_pattern, query)
+    
+    # Build SQL prompt with ticket-specific instructions if ticket ID detected
+    ticket_instructions = ""
+    if ticket_ids and schema_name == "ZendeskTickets":
+        ticket_instructions = f"\n\nSPECIFIC TICKET QUERY DETECTED: The user is asking about ticket ID(s): {', '.join(ticket_ids)}\n" \
+                             f"Generate a SQL query that searches for these specific ticket IDs using WHERE id IN ({', '.join(ticket_ids)}) or WHERE id = {ticket_ids[0]}\n" \
+                             f"Include all relevant columns: id, subject, description, status, priority, created_at, updated_at, assignee, tags, etc.\n"
+    elif ticket_ids and schema_name == "Jira_F":
+        ticket_instructions = f"\n\nSPECIFIC ISSUE QUERY DETECTED: The user is asking about issue key(s) or ID(s): {', '.join(ticket_ids)}\n" \
+                             f"Generate a SQL query that searches for these specific issues. Check both Key and ID columns.\n" \
+                             f"Include all relevant columns: Key, Summary, Description, Status, Priority, Created, Updated, Assignee, etc.\n"
+    
     sql_prompt = f"""
     You are a SQL query generator for Incorta schemas.
     Schema details: {schema_json}
     
     User query: {query}
-    
+    {ticket_instructions}
     Generate a valid Spark SQL query to answer the query.
     IMPORTANT REQUIREMENTS:
     1. Use the EXACT table names and column names from the schema details above
     2. Use the format: SchemaName.TableName (e.g., ZendeskTickets.ticket or Jira_F.Issues)
     3. Always include ORDER BY to sort results (e.g., ORDER BY created_at DESC or ORDER BY Created DESC)
-    4. Always include LIMIT clause (e.g., LIMIT 10 or LIMIT 20) to limit results
+    4. Always include LIMIT clause (e.g., LIMIT 10 or LIMIT 20) to limit results, unless searching for specific ticket IDs
     5. Use proper Spark SQL syntax
     6. Return ONLY the SQL query, no explanations, no markdown code blocks, just the raw SQL
     
     Example for "latest tickets":
     SELECT id, subject, created_at FROM ZendeskTickets.ticket ORDER BY created_at DESC LIMIT 10
     
+    Example for "ticket 12345":
+    SELECT id, subject, description, status, priority, created_at, updated_at FROM ZendeskTickets.ticket WHERE id = 12345
+    
     Example for "latest issues":
     SELECT Key, Summary, Created FROM Jira_F.Issues ORDER BY Created DESC LIMIT 10
+    
+    Example for "related bugs to ticket 12345":
+    SELECT Key, Summary, Description, Status, Priority FROM Jira_F.Issues WHERE Summary LIKE '%bug%' OR Description LIKE '%bug%' ORDER BY Created DESC LIMIT 20
     """
     
     # Try to get API manager for retry logic
@@ -853,13 +875,21 @@ def main() -> None:
                                     if zendesk_sql:
                                         logger.info(f"Zendesk SQL generated (full query): {zendesk_sql}")
                                         # Validate SQL query has required components
-                                        if "LIMIT" not in zendesk_sql.upper():
+                                        if "LIMIT" not in zendesk_sql.upper() and "WHERE" not in zendesk_sql.upper():
                                             logger.warning("Zendesk SQL missing LIMIT clause, adding LIMIT 10")
                                             zendesk_sql = zendesk_sql.rstrip(";") + " LIMIT 10"
                                         futures["zendesk"] = pool.submit(
                                             fetch_table_data,
                                             zendesk_sql
                                         )
+                                        
+                                        # If query mentions ticket or asks about related bugs, also search Jira for related issues
+                                        query_lower = user_input.lower()
+                                        if any(term in query_lower for term in ["ticket", "related", "bug", "issue", "related bug"]):
+                                            # Add Jira search for related bugs if not already in data_sources
+                                            if "jira" not in data_sources:
+                                                data_sources.append("jira")
+                                                logger.info("Added Jira to data sources for related bug search")
                                     else:
                                         logger.warning("Zendesk SQL generation returned empty string")
                             except Exception as e:
@@ -873,11 +903,19 @@ def main() -> None:
                                     logger.error(f"Failed to fetch Jira schema: {jira_schema.get('error')}")
                                 else:
                                     logger.info("Generating SQL for Jira query...")
-                                    jira_sql = generate_sql_for_schema("Jira_F", user_input)
+                                    # If query mentions "related" or "bug" with ticket context, enhance query
+                                    query_lower = user_input.lower()
+                                    enhanced_query = user_input
+                                    if any(term in query_lower for term in ["related", "related bug", "related issue"]):
+                                        # Enhance query to search for bugs/issues related to the ticket
+                                        enhanced_query = f"{user_input} - search for related bugs or issues"
+                                        logger.info("Enhanced Jira query for related bug search")
+                                    
+                                    jira_sql = generate_sql_for_schema("Jira_F", enhanced_query)
                                     if jira_sql:
                                         logger.info(f"Jira SQL generated (full query): {jira_sql}")
                                         # Validate SQL query has required components
-                                        if "LIMIT" not in jira_sql.upper():
+                                        if "LIMIT" not in jira_sql.upper() and "WHERE" not in jira_sql.upper():
                                             logger.warning("Jira SQL missing LIMIT clause, adding LIMIT 10")
                                             jira_sql = jira_sql.rstrip(";") + " LIMIT 10"
                                         futures["jira"] = pool.submit(
@@ -1053,24 +1091,40 @@ def main() -> None:
                                             ticket_id = None
                                             ticket_url = ""
                                             
-                                            # Extract ticket ID based on row format
+                                            # Extract ticket ID and other important fields based on row format
+                                            ticket_data = {}
                                             if isinstance(row, list):
                                                 for i, col in enumerate(columns):
-                                                    if i < len(row) and col.lower() in ['id', 'ticket_id', 'ticket id']:
-                                                        ticket_id = str(row[i])
-                                                        break
+                                                    if i < len(row):
+                                                        col_lower = col.lower()
+                                                        if col_lower in ['id', 'ticket_id', 'ticket id']:
+                                                            ticket_id = str(row[i])
+                                                        ticket_data[col] = row[i]
                                             elif isinstance(row, dict):
                                                 for col in columns:
-                                                    if col.lower() in ['id', 'ticket_id', 'ticket id'] and col in row:
-                                                        ticket_id = str(row[col])
-                                                        break
+                                                    if col in row:
+                                                        col_lower = col.lower()
+                                                        if col_lower in ['id', 'ticket_id', 'ticket id']:
+                                                            ticket_id = str(row[col])
+                                                        ticket_data[col] = row[col]
                                             
                                             if ticket_id:
                                                 ticket_url = f"https://incorta.zendesk.com/agent/tickets/{ticket_id}"
                                             
+                                            # Build comprehensive ticket text with all available fields for better context
+                                            comprehensive_text = ticket_text
+                                            # Add any missing important fields if available
+                                            if ticket_data:
+                                                important_fields = ['description', 'status', 'priority', 'assignee', 'tags', 'created_at', 'updated_at']
+                                                for field in important_fields:
+                                                    for col, val in ticket_data.items():
+                                                        if col.lower() == field.lower() and val and str(val).strip():
+                                                            if field.lower() not in comprehensive_text.lower():
+                                                                comprehensive_text += f" | {col}: {val}"
+                                            
                                             passages.append({
                                                 "source": "zendesk",
-                                                "text": ticket_text,
+                                                "text": comprehensive_text,
                                                 "title": f"Zendesk Ticket {ticket_id or 'N/A'}",
                                                 "url": ticket_url,
                                                 "score": 1.0  # Zendesk results are already filtered
