@@ -210,13 +210,24 @@ def search_docs_plain(query: str, limit: int = 5) -> List[dict]:
 )
 def fetch_schema_details(schema_name: str) -> dict:
     """Fetch schema details from the Incorta environment."""
-    env_url = os.getenv("INCORTA_ENV_URL")
-    tenant = os.getenv("INCORTA_TENANT")
-    user = os.getenv("INCORTA_USERNAME")  # Fix: use os.getenv instead of undefined variable
-    password = os.getenv("INCORTA_PASSWORD")
+    # Try to get credentials from Streamlit secrets first, then environment variables
+    try:
+        import streamlit as st
+        env_url = st.secrets.get("INCORTA_ENV_URL") or os.getenv("INCORTA_ENV_URL")
+        tenant = st.secrets.get("INCORTA_TENANT") or os.getenv("INCORTA_TENANT")
+        user = st.secrets.get("INCORTA_USERNAME") or os.getenv("INCORTA_USERNAME")
+        password = st.secrets.get("INCORTA_PASSWORD") or os.getenv("INCORTA_PASSWORD")
+    except Exception:
+        # If not in Streamlit context, use environment variables only
+        env_url = os.getenv("INCORTA_ENV_URL")
+        tenant = os.getenv("INCORTA_TENANT")
+        user = os.getenv("INCORTA_USERNAME")
+        password = os.getenv("INCORTA_PASSWORD")
     
     if not all([env_url, tenant, user, password]):
-        return {"error": "Missing Incorta credentials. Set INCORTA_ENV_URL, INCORTA_TENANT, INCORTA_USERNAME, INCORTA_PASSWORD"}
+        error_msg = "Missing Incorta credentials. Set INCORTA_ENV_URL, INCORTA_TENANT, INCORTA_USERNAME, INCORTA_PASSWORD in environment variables or Streamlit secrets"
+        logger.error(f"fetch_schema_details failed: {error_msg}")
+        return {"error": error_msg}
     
     try:
         # Login to get session
@@ -292,13 +303,24 @@ def fetch_schema_details(schema_name: str) -> dict:
 )
 def fetch_table_data(spark_sql: str) -> dict:
     """Fetch table data from the Incorta environment."""
-    env_url = os.getenv("INCORTA_ENV_URL")
-    tenant = os.getenv("INCORTA_TENANT")
-    user = os.getenv("INCORTA_USERNAME")  # Fix: use os.getenv instead of undefined variable
-    password = os.getenv("INCORTA_PASSWORD")
+    # Try to get credentials from Streamlit secrets first, then environment variables
+    try:
+        import streamlit as st
+        env_url = st.secrets.get("INCORTA_ENV_URL") or os.getenv("INCORTA_ENV_URL")
+        tenant = st.secrets.get("INCORTA_TENANT") or os.getenv("INCORTA_TENANT")
+        user = st.secrets.get("INCORTA_USERNAME") or os.getenv("INCORTA_USERNAME")
+        password = st.secrets.get("INCORTA_PASSWORD") or os.getenv("INCORTA_PASSWORD")
+    except Exception:
+        # If not in Streamlit context, use environment variables only
+        env_url = os.getenv("INCORTA_ENV_URL")
+        tenant = os.getenv("INCORTA_TENANT")
+        user = os.getenv("INCORTA_USERNAME")
+        password = os.getenv("INCORTA_PASSWORD")
     
     if not all([env_url, tenant, user, password]):
-        return {"error": "Missing Incorta credentials"}
+        error_msg = "Missing Incorta credentials. Set INCORTA_ENV_URL, INCORTA_TENANT, INCORTA_USERNAME, INCORTA_PASSWORD in environment variables or Streamlit secrets"
+        logger.error(f"fetch_table_data failed: {error_msg}")
+        return {"error": error_msg}
     
     try:
         # Login to get session

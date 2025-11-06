@@ -227,7 +227,7 @@ def _render_sources(slack_messages: List[dict], confluence_pages: List[dict], do
                     <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
                         <span style="font-weight: 600; color: #1f1f1f;">#{channel}</span>
                         <div style="display: flex; gap: 10px; align-items: center;">
-                            <span style="color: #666; font-size: 0.9em;">{timestamp}</span>
+                        <span style="color: #666; font-size: 0.9em;">{timestamp}</span>
                             <span style="color: #888; font-size: 0.9em;">Score: {relevance_score:.2f}</span>
                         </div>
                     </div>
@@ -311,9 +311,16 @@ def _render_sources(slack_messages: List[dict], confluence_pages: List[dict], do
 def generate_sql_for_schema(schema_name: str, query: str) -> str:
     schema_details = fetch_schema_details(schema_name)
     if 'error' in schema_details:
+        logger.error(f"generate_sql_for_schema failed for {schema_name}: {schema_details.get('error')}")
         return ""
     
-    schema_json = json.dumps(schema_details, indent=2)
+    # Extract schema_details from the response if it's nested
+    if 'schema_details' in schema_details:
+        schema_data = schema_details['schema_details']
+    else:
+        schema_data = schema_details
+    
+    schema_json = json.dumps(schema_data, indent=2)
     
     sql_prompt = f"""
     You are a SQL query generator for Incorta schemas.
@@ -382,20 +389,20 @@ def main() -> None:
                 expected_state = st.session_state.get("slack_oauth_state", "")
                 if expected_state and returned_state != expected_state:
                     st.error("❌ Authentication failed: invalid_state. Please try again.")
-                    try:
-                        st.query_params.clear()
-                    except Exception:
-                        pass
-                    st.stop()
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                st.stop()
 
                 # Check if this code was already processed
                 processed_code = st.session_state.get("processed_oauth_code", "")
                 if processed_code == oauth_code:
                     logger.info("OAuth code already processed, clearing params and continuing")
-                    try:
-                        st.query_params.clear()
-                    except Exception:
-                        pass
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
                     # Ensure chat state exists
                     if "chat_messages" not in st.session_state:
                         st.session_state["chat_messages"] = [
@@ -406,32 +413,32 @@ def main() -> None:
                     # Process the OAuth code
                     logger.info("Processing OAuth code...")
                     token = exchange_code_for_token(oauth_code)
-                    user_info = get_user_info(token)
-                    st.session_state["slack_token"] = token
-                    st.session_state["slack_user_name"] = user_info.get("name", "User")
-                    st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
-                    st.session_state["slack_user_id"] = user_info.get("id", "")
-                    st.session_state["processed_oauth_code"] = oauth_code  # Mark code as processed
+            user_info = get_user_info(token)
+            st.session_state["slack_token"] = token
+            st.session_state["slack_user_name"] = user_info.get("name", "User")
+            st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
+            st.session_state["slack_user_id"] = user_info.get("id", "")
+            st.session_state["processed_oauth_code"] = oauth_code  # Mark code as processed
                     
-                    # Ensure chat_messages exists after OAuth
-                    if "chat_messages" not in st.session_state:
-                        st.session_state["chat_messages"] = [
-                            {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-                        ]
-                        logger.info("Reinitialized chat_messages after OAuth")
+            # Ensure chat_messages exists after OAuth
+            if "chat_messages" not in st.session_state:
+                st.session_state["chat_messages"] = [
+                    {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+                ]
+                logger.info("Reinitialized chat_messages after OAuth")
+            
+            logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
+            logger.info(f"Chat messages after OAuth: {len(st.session_state.get('chat_messages', []))} messages")
+            
+            # Clear URL params BEFORE showing success message
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
                     
-                    logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
-                    logger.info(f"Chat messages after OAuth: {len(st.session_state.get('chat_messages', []))} messages")
-                    
-                    # Clear URL params BEFORE showing success message
-                    try:
-                        st.query_params.clear()
-                    except Exception:
-                        pass
-                    
-                    st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
+            st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
                     # Rerun to reload page without OAuth params
-                    st.rerun()
+            st.rerun()
         except Exception as e:
             msg = str(e)
             logger.error(f"OAuth error: {msg}", exc_info=True)
@@ -517,7 +524,7 @@ def main() -> None:
         st.session_state["conf_results"] = []
     if "filters" not in st.session_state:
         st.session_state["filters"] = {}
-    
+
     logger.debug(f"Chat state initialized. Messages count: {len(st.session_state.get('chat_messages', []))}")
 
     # Display chat messages - handle errors gracefully
@@ -690,22 +697,44 @@ def main() -> None:
                                 futures["docs"] = pool.submit(search_docs_plain, user_input, doc_limit)
                             
                             if "zendesk" in data_sources:
-                                zendesk_schema = fetch_schema_details("ZendeskTickets")
-                                zendesk_sql = generate_sql_for_schema("ZendeskTickets", user_input)
-                                if zendesk_sql:
-                                    futures["zendesk"] = pool.submit(
-                                        fetch_table_data,
-                                        zendesk_sql
-                                    )
+                                try:
+                                    logger.info("Fetching Zendesk schema details...")
+                                    zendesk_schema = fetch_schema_details("ZendeskTickets")
+                                    if 'error' in zendesk_schema:
+                                        logger.error(f"Failed to fetch Zendesk schema: {zendesk_schema.get('error')}")
+                                    else:
+                                        logger.info("Generating SQL for Zendesk query...")
+                                        zendesk_sql = generate_sql_for_schema("ZendeskTickets", user_input)
+                                        if zendesk_sql:
+                                            logger.info(f"Zendesk SQL generated: {zendesk_sql[:100]}...")
+                                            futures["zendesk"] = pool.submit(
+                                                fetch_table_data,
+                                                zendesk_sql
+                                            )
+                                        else:
+                                            logger.warning("Zendesk SQL generation returned empty string")
+                                except Exception as e:
+                                    logger.error(f"Error setting up Zendesk search: {e}", exc_info=True)
                             
                             if "jira" in data_sources:
-                                jira_schema = fetch_schema_details("Jira_F")
-                                jira_sql = generate_sql_for_schema("Jira_F", user_input)
-                                if jira_sql:
-                                    futures["jira"] = pool.submit(
-                                        fetch_table_data,
-                                        jira_sql
-                                    )
+                                try:
+                                    logger.info("Fetching Jira schema details...")
+                                    jira_schema = fetch_schema_details("Jira_F")
+                                    if 'error' in jira_schema:
+                                        logger.error(f"Failed to fetch Jira schema: {jira_schema.get('error')}")
+                                    else:
+                                        logger.info("Generating SQL for Jira query...")
+                                        jira_sql = generate_sql_for_schema("Jira_F", user_input)
+                                        if jira_sql:
+                                            logger.info(f"Jira SQL generated: {jira_sql[:100]}...")
+                                            futures["jira"] = pool.submit(
+                                                fetch_table_data,
+                                                jira_sql
+                                            )
+                                        else:
+                                            logger.warning("Jira SQL generation returned empty string")
+                                except Exception as e:
+                                    logger.error(f"Error setting up Jira search: {e}", exc_info=True)
                             
                             for source, future in futures.items():
                                 try:
@@ -726,25 +755,25 @@ def main() -> None:
                                     else:
                                         st.warning(f"⚠️ {source.title()} search encountered an issue: {str(e)}")
 
-                        if not slack_results and not conf_results and not docs_results and not zendesk_results and not jira_results:
-                            nores = "No results found in any source. Try adjusting your query or filters."
-                            st.write(nores)
-                            st.session_state["chat_messages"].append({"role": "assistant", "content": nores})
-                            return
-                        
-                        context = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                        st.session_state["context"] = context
-                        st.session_state["slack_results"] = slack_results
-                        st.session_state["conf_results"] = conf_results
-                        st.session_state["docs_results"] = docs_results
-                        st.session_state["zendesk_results"] = zendesk_results
-                        st.session_state["jira_results"] = jira_results
-                        st.session_state["filters"] = current_filters
-                        st.session_state["intent_data"] = intent_data
+                            if not slack_results and not conf_results and not docs_results and not zendesk_results and not jira_results:
+                                nores = "No results found in any source. Try adjusting your query or filters."
+                                st.write(nores)
+                                st.session_state["chat_messages"].append({"role": "assistant", "content": nores})
+                                return
+                            
+                            context = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                            st.session_state["context"] = context
+                            st.session_state["slack_results"] = slack_results
+                            st.session_state["conf_results"] = conf_results
+                            st.session_state["docs_results"] = docs_results
+                            st.session_state["zendesk_results"] = zendesk_results
+                            st.session_state["jira_results"] = jira_results
+                            st.session_state["filters"] = current_filters
+                            st.session_state["intent_data"] = intent_data
 
-                preface = ("Previous conversation context (use for continuity):\n" + "\n".join([f"{prefix} {m['content']}" for m in st.session_state["chat_messages"][-6:] if (prefix := "User:" if m["role"] == "user" else "Assistant:")]) + "\n\n") if st.session_state["chat_messages"][-6:] else ""
+            preface = ("Previous conversation context (use for continuity):\n" + "\n".join([f"{prefix} {m['content']}" for m in st.session_state["chat_messages"][-6:] if (prefix := "User:" if m["role"] == "user" else "Assistant:")]) + "\n\n") if st.session_state["chat_messages"][-6:] else ""
 
-                with st.spinner("Thinking..."):
+            with st.spinner("Thinking..."):
                     # Generate structured answer with citations
                     try:
                         # Prepare passages for citation-based answer
@@ -805,6 +834,72 @@ def main() -> None:
                             else:
                                 logger.debug(f"Skipping Knowledge Base doc '{title}' - no text content (length: {len(text) if text else 0})")
                         
+                        # Add Zendesk passages
+                        if zendesk_results and 'data' in zendesk_results and 'error' not in zendesk_results:
+                            data = zendesk_results['data']
+                            columns = data.get('columns', [])
+                            rows = data.get('rows', [])
+                            if columns and rows:
+                                # Format Zendesk tickets as passages
+                                for row in rows[:10]:  # Limit to top 10 tickets
+                                    # Convert row to text representation
+                                    row_text_parts = []
+                                    for i, col in enumerate(columns):
+                                        if i < len(row):
+                                            row_text_parts.append(f"{col}: {row[i]}")
+                                    ticket_text = " | ".join(row_text_parts)
+                                    
+                                    if ticket_text and len(ticket_text.strip()) >= 10:
+                                        # Try to extract ticket ID and URL if available
+                                        ticket_id = None
+                                        ticket_url = ""
+                                        for i, col in enumerate(columns):
+                                            if i < len(row) and col.lower() in ['id', 'ticket_id', 'ticket id']:
+                                                ticket_id = str(row[i])
+                                                ticket_url = f"https://incorta.zendesk.com/agent/tickets/{ticket_id}" if ticket_id else ""
+                                                break
+                                        
+                                        passages.append({
+                                            "source": "zendesk",
+                                            "text": ticket_text,
+                                            "title": f"Zendesk Ticket {ticket_id or 'N/A'}",
+                                            "url": ticket_url,
+                                            "score": 1.0  # Zendesk results are already filtered
+                                        })
+                        
+                        # Add Jira passages
+                        if jira_results and 'data' in jira_results and 'error' not in jira_results:
+                            data = jira_results['data']
+                            columns = data.get('columns', [])
+                            rows = data.get('rows', [])
+                            if columns and rows:
+                                # Format Jira issues as passages
+                                for row in rows[:10]:  # Limit to top 10 issues
+                                    # Convert row to text representation
+                                    row_text_parts = []
+                                    for i, col in enumerate(columns):
+                                        if i < len(row):
+                                            row_text_parts.append(f"{col}: {row[i]}")
+                                    issue_text = " | ".join(row_text_parts)
+                                    
+                                    if issue_text and len(issue_text.strip()) >= 10:
+                                        # Try to extract issue key and URL if available
+                                        issue_key = None
+                                        issue_url = ""
+                                        for i, col in enumerate(columns):
+                                            if i < len(row) and col.lower() in ['key', 'issue_key', 'issue key', 'jira_key']:
+                                                issue_key = str(row[i])
+                                                issue_url = f"https://incorta.atlassian.net/browse/{issue_key}" if issue_key else ""
+                                                break
+                                        
+                                        passages.append({
+                                            "source": "jira",
+                                            "text": issue_text,
+                                            "title": f"Jira Issue {issue_key or 'N/A'}",
+                                            "url": issue_url,
+                                            "score": 1.0  # Jira results are already filtered
+                                        })
+                        
                         # Log passage count for debugging
                         logger.info(f"Prepared {len(passages)} passages for answer generation")
                         logger.info(f"Passage sources: {[p.get('source', 'unknown') for p in passages[:5]]}")
@@ -845,47 +940,47 @@ def main() -> None:
                         except Exception:
                             summary_text = "An error occurred while generating the answer. Please try again."
 
-                grouped_output = _format_grouped_response(
-                    summary_text,
-                    slack_results,
-                    conf_results,
-                )
+            grouped_output = _format_grouped_response(
+                summary_text,
+                slack_results,
+                conf_results,
+            )
 
-                st.markdown(grouped_output)
+            st.markdown(grouped_output)
 
-                # Agent Trace: log to terminal instead of UI
-                try:
-                    strategies = [r.get('strategy') for r in (slack_results or []) if r.get('strategy')]
-                    strat_counts = {}
-                    for s in strategies:
-                        strat_counts[s] = strat_counts.get(s, 0) + 1
-                    channels = sorted({r.get('channel') for r in (slack_results or []) if r.get('channel')})
-                    conf_top = ", ".join([c.get('title','') for c in (conf_results or [])[:5]])
-                    docs_top = ", ".join([d.get('title','') for d in (docs_results or [])[:5]])
-                    if strat_counts:
-                        logger.info("Agent Trace: Slack strategies used: " + ", ".join([f"{k} x{v}" for k,v in strat_counts.items()]))
-                    if channels:
-                        logger.info("Agent Trace: Slack channels searched: " + ", ".join([f"#{c}" for c in channels]))
-                    logger.info(f"Agent Trace: Confluence results: {len(conf_results or [])}; Top: {conf_top}")
-                    logger.info(f"Agent Trace: Docs results: {len(docs_results or [])}; Top: {docs_top}")
-                except Exception:
-                    pass
+            # Agent Trace: log to terminal instead of UI
+            try:
+                strategies = [r.get('strategy') for r in (slack_results or []) if r.get('strategy')]
+                strat_counts = {}
+                for s in strategies:
+                    strat_counts[s] = strat_counts.get(s, 0) + 1
+                channels = sorted({r.get('channel') for r in (slack_results or []) if r.get('channel')})
+                conf_top = ", ".join([c.get('title','') for c in (conf_results or [])[:5]])
+                docs_top = ", ".join([d.get('title','') for d in (docs_results or [])[:5]])
+                if strat_counts:
+                    logger.info("Agent Trace: Slack strategies used: " + ", ".join([f"{k} x{v}" for k,v in strat_counts.items()]))
+                if channels:
+                    logger.info("Agent Trace: Slack channels searched: " + ", ".join([f"#{c}" for c in channels]))
+                logger.info(f"Agent Trace: Confluence results: {len(conf_results or [])}; Top: {conf_top}")
+                logger.info(f"Agent Trace: Docs results: {len(docs_results or [])}; Top: {docs_top}")
+            except Exception:
+                pass
 
-                if slack_results or conf_results or docs_results or zendesk_results or jira_results:
-                    _render_sources(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                
-                st.session_state["chat_messages"].append({"role": "assistant", "content": grouped_output})
+            if slack_results or conf_results or docs_results or zendesk_results or jira_results:
+                _render_sources(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+            
+            st.session_state["chat_messages"].append({"role": "assistant", "content": grouped_output})
 
-                new_entry = {
-                    "question": user_input.strip(),
-                    "channel_hint": (channel_hint or "").strip() or None,
-                    "space_hint": (space_hint or "").strip() or None,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                }
-                if not st.session_state["search_history"] or st.session_state["search_history"][0].get("question") != new_entry["question"]:
-                    st.session_state["search_history"].insert(0, new_entry)
-                    if len(st.session_state["search_history"]) > 50:
-                        st.session_state["search_history"] = st.session_state["search_history"][:50]
+            new_entry = {
+                "question": user_input.strip(),
+                "channel_hint": (channel_hint or "").strip() or None,
+                "space_hint": (space_hint or "").strip() or None,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+            if not st.session_state["search_history"] or st.session_state["search_history"][0].get("question") != new_entry["question"]:
+                st.session_state["search_history"].insert(0, new_entry)
+                if len(st.session_state["search_history"]) > 50:
+                    st.session_state["search_history"] = st.session_state["search_history"][:50]
         except Exception as e:
             error_msg = f"An error occurred while processing your query: {str(e)}"
             logger.error(f"Error in chat processing: {e}", exc_info=True)
