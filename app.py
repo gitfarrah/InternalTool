@@ -329,8 +329,19 @@ def generate_sql_for_schema(schema_name: str, query: str) -> str:
     User query: {query}
     
     Generate a valid Spark SQL query to answer the query.
-    Use the schema tables and columns appropriately.
-    Return ONLY the SQL query, no explanations, no markdown code blocks, just the raw SQL.
+    IMPORTANT REQUIREMENTS:
+    1. Use the EXACT table names and column names from the schema details above
+    2. Use the format: SchemaName.TableName (e.g., ZendeskTickets.ticket or Jira_F.Issues)
+    3. Always include ORDER BY to sort results (e.g., ORDER BY created_at DESC or ORDER BY Created DESC)
+    4. Always include LIMIT clause (e.g., LIMIT 10 or LIMIT 20) to limit results
+    5. Use proper Spark SQL syntax
+    6. Return ONLY the SQL query, no explanations, no markdown code blocks, just the raw SQL
+    
+    Example for "latest tickets":
+    SELECT id, subject, created_at FROM ZendeskTickets.ticket ORDER BY created_at DESC LIMIT 10
+    
+    Example for "latest issues":
+    SELECT Key, Summary, Created FROM Jira_F.Issues ORDER BY Created DESC LIMIT 10
     """
     
     # Try to get API manager for retry logic
@@ -438,8 +449,8 @@ def generate_sql_for_schema(schema_name: str, query: str) -> str:
         logger.error(f"SQL cleaning resulted in empty string for {schema_name}")
         return ""
     
-    logger.info(f"Generated SQL for {schema_name}: {sql_cleaned[:100]}...")
-    logger.debug(f"Full SQL query: {sql_cleaned}")
+    logger.info(f"Generated SQL for {schema_name}: {sql_cleaned}")
+    logger.debug(f"Full SQL query length: {len(sql_cleaned)} characters")
     return sql_cleaned
 
 def _is_slack_authenticated_cached() -> bool:
@@ -816,7 +827,11 @@ def main() -> None:
                                         logger.info("Generating SQL for Zendesk query...")
                                         zendesk_sql = generate_sql_for_schema("ZendeskTickets", user_input)
                                         if zendesk_sql:
-                                            logger.info(f"Zendesk SQL generated: {zendesk_sql[:100]}...")
+                                            logger.info(f"Zendesk SQL generated (full query): {zendesk_sql}")
+                                            # Validate SQL query has required components
+                                            if "LIMIT" not in zendesk_sql.upper():
+                                                logger.warning("Zendesk SQL missing LIMIT clause, adding LIMIT 10")
+                                                zendesk_sql = zendesk_sql.rstrip(";") + " LIMIT 10"
                                             futures["zendesk"] = pool.submit(
                                                 fetch_table_data,
                                                 zendesk_sql
@@ -836,7 +851,11 @@ def main() -> None:
                                         logger.info("Generating SQL for Jira query...")
                                         jira_sql = generate_sql_for_schema("Jira_F", user_input)
                                         if jira_sql:
-                                            logger.info(f"Jira SQL generated: {jira_sql[:100]}...")
+                                            logger.info(f"Jira SQL generated (full query): {jira_sql}")
+                                            # Validate SQL query has required components
+                                            if "LIMIT" not in jira_sql.upper():
+                                                logger.warning("Jira SQL missing LIMIT clause, adding LIMIT 10")
+                                                jira_sql = jira_sql.rstrip(";") + " LIMIT 10"
                                             futures["jira"] = pool.submit(
                                                 fetch_table_data,
                                                 jira_sql

@@ -376,7 +376,7 @@ def fetch_table_data(spark_sql: str) -> dict:
         }
         
         params = {"sql": spark_sql}
-        logger.debug(f"Full SQL query being executed: {spark_sql}")
+        logger.info(f"Full SQL query being executed: {spark_sql}")
         response = requests.post(url, headers=headers, json=params, verify=True, timeout=60)
         
         if response.status_code == 200:
@@ -387,8 +387,12 @@ def fetch_table_data(spark_sql: str) -> dict:
                 rows = result_data.get("rows", [])
                 logger.info(f"SQL query executed successfully. Returned {len(rows)} rows with {len(columns)} columns")
                 if len(rows) == 0:
-                    logger.warning(f"SQL query returned 0 rows. Query was: {spark_sql[:200]}...")
-                    logger.debug(f"Response structure: {list(result_data.keys())}")
+                    logger.warning(f"SQL query returned 0 rows. Full query: {spark_sql}")
+                    logger.warning(f"Response structure: {list(result_data.keys())}")
+                    if "columns" in result_data:
+                        logger.warning(f"Columns in response: {result_data.get('columns', [])}")
+                    if "rows" in result_data:
+                        logger.warning(f"Number of rows: {len(result_data.get('rows', []))}")
             return {"data": result_data}
         else:
             error_text = response.text
