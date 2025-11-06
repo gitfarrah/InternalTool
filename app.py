@@ -330,11 +330,32 @@ def generate_sql_for_schema(schema_name: str, query: str) -> str:
     
     Generate a valid Spark SQL query to answer the query.
     Use the schema tables and columns appropriately.
-    Return ONLY the SQL query, no explanations.
+    Return ONLY the SQL query, no explanations, no markdown code blocks, just the raw SQL.
     """
     
     sql_response = ask_gemini(sql_prompt, "")
-    return sql_response.strip()
+    
+    # Strip markdown code blocks if present (```sql ... ``` or ``` ... ```)
+    sql_cleaned = sql_response.strip()
+    
+    # Remove markdown code fence if present - handle both ```sql and ``` formats
+    if sql_cleaned.startswith("```"):
+        # Split into lines
+        lines = sql_cleaned.split("\n")
+        # Remove first line if it's a code fence (handles both ``` and ```sql)
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        # Remove last line if it's a closing code fence
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        sql_cleaned = "\n".join(lines).strip()
+    
+    # Also handle case where markdown might be on same line as SQL
+    sql_cleaned = sql_cleaned.replace("```sql", "").replace("```", "").strip()
+    
+    logger.info(f"Generated SQL for {schema_name}: {sql_cleaned[:100]}...")
+    logger.debug(f"Full SQL query: {sql_cleaned}")
+    return sql_cleaned
 
 def _is_slack_authenticated_cached() -> bool:
     """Cache Slack token validity to avoid repeated auth_test calls on every render."""
@@ -777,212 +798,212 @@ def main() -> None:
                                     else:
                                         st.warning(f"⚠️ {source.title()} search encountered an issue: {str(e)}")
 
-                            if not slack_results and not conf_results and not docs_results and not zendesk_results and not jira_results:
-                                nores = "No results found in any source. Try adjusting your query or filters."
-                                st.write(nores)
-                                st.session_state["chat_messages"].append({"role": "assistant", "content": nores})
-                                return
-                            
-                            context = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                            st.session_state["context"] = context
-                            st.session_state["slack_results"] = slack_results
-                            st.session_state["conf_results"] = conf_results
-                            st.session_state["docs_results"] = docs_results
-                            st.session_state["zendesk_results"] = zendesk_results
-                            st.session_state["jira_results"] = jira_results
-                            st.session_state["filters"] = current_filters
-                            st.session_state["intent_data"] = intent_data
+                        if not slack_results and not conf_results and not docs_results and not zendesk_results and not jira_results:
+                            nores = "No results found in any source. Try adjusting your query or filters."
+                            st.write(nores)
+                            st.session_state["chat_messages"].append({"role": "assistant", "content": nores})
+                            return
+                        
+                        context = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                        st.session_state["context"] = context
+                        st.session_state["slack_results"] = slack_results
+                        st.session_state["conf_results"] = conf_results
+                        st.session_state["docs_results"] = docs_results
+                        st.session_state["zendesk_results"] = zendesk_results
+                        st.session_state["jira_results"] = jira_results
+                        st.session_state["filters"] = current_filters
+                        st.session_state["intent_data"] = intent_data
 
             preface = ("Previous conversation context (use for continuity):\n" + "\n".join([f"{prefix} {m['content']}" for m in st.session_state["chat_messages"][-6:] if (prefix := "User:" if m["role"] == "user" else "Assistant:")]) + "\n\n") if st.session_state["chat_messages"][-6:] else ""
 
             with st.spinner("Thinking..."):
-                    # Generate structured answer with citations
-                    try:
-                        # Prepare passages for citation-based answer
-                        passages = []
+                # Generate structured answer with citations
+                try:
+                    # Prepare passages for citation-based answer
+                    passages = []
+                    
+                    # Add Slack passages
+                    for msg in (slack_results or [])[:10]:
+                        passages.append({
+                            "source": "slack",
+                            "text": _clean_slack_text(msg.get('text', '')),
+                            "title": f"#{msg.get('channel', 'unknown')} - @{msg.get('username', 'unknown')}",
+                            "url": msg.get('permalink', ''),
+                            "timestamp": msg.get('date', '')
+                        })
+                    
+                    # Add Confluence passages
+                    for page in (conf_results or [])[:10]:
+                        passages.append({
+                            "source": "confluence",
+                            "text": page.get('excerpt', ''),
+                            "title": page.get('title', 'Untitled'),
+                            "url": page.get('url', ''),
+                            "space": page.get('space', '')
+                        })
+                    
+                    # Add Knowledge Base passages
+                    for doc in (docs_results or [])[:10]:
+                        # search_docs_plain returns formatted dicts with title, url, text, score, source
+                        # Handle both Qdrant ScoredPoint format and pre-formatted dict format
+                        if hasattr(doc, 'payload'):
+                            # Qdrant ScoredPoint object
+                            payload = doc.payload
+                            text = str(payload.get('text', '') or payload.get('content', '') or '').strip()
+                            title = str(payload.get('title', 'Untitled') or 'Untitled')
+                            url = str(payload.get('url', '') or '')
+                            score = doc.score if hasattr(doc, 'score') else 0.0
+                        elif isinstance(doc, dict):
+                            # Pre-formatted dict from search_docs_plain
+                            text = str(doc.get('text', '') or doc.get('content', '') or '').strip()
+                            title = str(doc.get('title', 'Untitled') or 'Untitled')
+                            url = str(doc.get('url', '') or '')
+                            score = doc.get('score', 0.0)
+                        else:
+                            text = ''
+                            title = 'Untitled'
+                            url = ''
+                            score = 0.0
                         
-                        # Add Slack passages
-                        for msg in (slack_results or [])[:10]:
+                        # Only add passage if it has text content (minimum 10 chars to avoid empty snippets)
+                        if text and len(text.strip()) >= 10:
                             passages.append({
-                                "source": "slack",
-                                "text": _clean_slack_text(msg.get('text', '')),
-                                "title": f"#{msg.get('channel', 'unknown')} - @{msg.get('username', 'unknown')}",
-                                "url": msg.get('permalink', ''),
-                                "timestamp": msg.get('date', '')
+                                "source": "knowledge_base",
+                                "text": text,
+                                "title": title,
+                                "url": url,
+                                "score": score
                             })
-                        
-                        # Add Confluence passages
-                        for page in (conf_results or [])[:10]:
-                            passages.append({
-                                "source": "confluence",
-                                "text": page.get('excerpt', ''),
-                                "title": page.get('title', 'Untitled'),
-                                "url": page.get('url', ''),
-                                "space": page.get('space', '')
-                            })
-                        
-                        # Add Knowledge Base passages
-                        for doc in (docs_results or [])[:10]:
-                            # search_docs_plain returns formatted dicts with title, url, text, score, source
-                            # Handle both Qdrant ScoredPoint format and pre-formatted dict format
-                            if hasattr(doc, 'payload'):
-                                # Qdrant ScoredPoint object
-                                payload = doc.payload
-                                text = str(payload.get('text', '') or payload.get('content', '') or '').strip()
-                                title = str(payload.get('title', 'Untitled') or 'Untitled')
-                                url = str(payload.get('url', '') or '')
-                                score = doc.score if hasattr(doc, 'score') else 0.0
-                            elif isinstance(doc, dict):
-                                # Pre-formatted dict from search_docs_plain
-                                text = str(doc.get('text', '') or doc.get('content', '') or '').strip()
-                                title = str(doc.get('title', 'Untitled') or 'Untitled')
-                                url = str(doc.get('url', '') or '')
-                                score = doc.get('score', 0.0)
-                            else:
-                                text = ''
-                                title = 'Untitled'
-                                url = ''
-                                score = 0.0
-                            
-                            # Only add passage if it has text content (minimum 10 chars to avoid empty snippets)
-                            if text and len(text.strip()) >= 10:
-                                passages.append({
-                                    "source": "knowledge_base",
-                                    "text": text,
-                                    "title": title,
-                                    "url": url,
-                                    "score": score
-                                })
-                            else:
-                                logger.debug(f"Skipping Knowledge Base doc '{title}' - no text content (length: {len(text) if text else 0})")
-                        
-                        # Add Zendesk passages
-                        if zendesk_results:
-                            if 'error' in zendesk_results:
-                                logger.warning(f"Zendesk results contain error: {zendesk_results.get('error')}")
-                            elif 'data' in zendesk_results:
-                                data = zendesk_results['data']
-                                columns = data.get('columns', []) if isinstance(data, dict) else []
-                                rows = data.get('rows', []) if isinstance(data, dict) else []
-                                logger.info(f"Processing Zendesk passages: {len(rows)} rows, {len(columns)} columns")
-                                if columns and rows:
-                                    # Format Zendesk tickets as passages
-                                    for row in rows[:10]:  # Limit to top 10 tickets
-                                        # Convert row to text representation
-                                        row_text_parts = []
+                        else:
+                            logger.debug(f"Skipping Knowledge Base doc '{title}' - no text content (length: {len(text) if text else 0})")
+                    
+                    # Add Zendesk passages
+                    if zendesk_results:
+                        if 'error' in zendesk_results:
+                            logger.warning(f"Zendesk results contain error: {zendesk_results.get('error')}")
+                        elif 'data' in zendesk_results:
+                            data = zendesk_results['data']
+                            columns = data.get('columns', []) if isinstance(data, dict) else []
+                            rows = data.get('rows', []) if isinstance(data, dict) else []
+                            logger.info(f"Processing Zendesk passages: {len(rows)} rows, {len(columns)} columns")
+                            if columns and rows:
+                                # Format Zendesk tickets as passages
+                                for row in rows[:10]:  # Limit to top 10 tickets
+                                    # Convert row to text representation
+                                    row_text_parts = []
+                                    for i, col in enumerate(columns):
+                                        if i < len(row):
+                                            row_text_parts.append(f"{col}: {row[i]}")
+                                    ticket_text = " | ".join(row_text_parts)
+                                    
+                                    if ticket_text and len(ticket_text.strip()) >= 10:
+                                        # Try to extract ticket ID and URL if available
+                                        ticket_id = None
+                                        ticket_url = ""
                                         for i, col in enumerate(columns):
-                                            if i < len(row):
-                                                row_text_parts.append(f"{col}: {row[i]}")
-                                        ticket_text = " | ".join(row_text_parts)
+                                            if i < len(row) and col.lower() in ['id', 'ticket_id', 'ticket id']:
+                                                ticket_id = str(row[i])
+                                                ticket_url = f"https://incorta.zendesk.com/agent/tickets/{ticket_id}" if ticket_id else ""
+                                                break
                                         
-                                        if ticket_text and len(ticket_text.strip()) >= 10:
-                                            # Try to extract ticket ID and URL if available
-                                            ticket_id = None
-                                            ticket_url = ""
-                                            for i, col in enumerate(columns):
-                                                if i < len(row) and col.lower() in ['id', 'ticket_id', 'ticket id']:
-                                                    ticket_id = str(row[i])
-                                                    ticket_url = f"https://incorta.zendesk.com/agent/tickets/{ticket_id}" if ticket_id else ""
-                                                    break
-                                            
-                                            passages.append({
-                                                "source": "zendesk",
-                                                "text": ticket_text,
-                                                "title": f"Zendesk Ticket {ticket_id or 'N/A'}",
-                                                "url": ticket_url,
-                                                "score": 1.0  # Zendesk results are already filtered
-                                            })
-                                            logger.debug(f"Added Zendesk passage: Ticket {ticket_id}")
-                                else:
-                                    logger.warning(f"Zendesk data missing columns or rows. Columns: {len(columns)}, Rows: {len(rows)}")
+                                        passages.append({
+                                            "source": "zendesk",
+                                            "text": ticket_text,
+                                            "title": f"Zendesk Ticket {ticket_id or 'N/A'}",
+                                            "url": ticket_url,
+                                            "score": 1.0  # Zendesk results are already filtered
+                                        })
+                                        logger.debug(f"Added Zendesk passage: Ticket {ticket_id}")
                             else:
-                                logger.warning(f"Zendesk results missing 'data' key. Keys: {list(zendesk_results.keys())}")
+                                logger.warning(f"Zendesk data missing columns or rows. Columns: {len(columns)}, Rows: {len(rows)}")
                         else:
-                            logger.debug("No Zendesk results to process")
-                        
-                        # Add Jira passages
-                        if jira_results:
-                            if 'error' in jira_results:
-                                logger.warning(f"Jira results contain error: {jira_results.get('error')}")
-                            elif 'data' in jira_results:
-                                data = jira_results['data']
-                                columns = data.get('columns', []) if isinstance(data, dict) else []
-                                rows = data.get('rows', []) if isinstance(data, dict) else []
-                                logger.info(f"Processing Jira passages: {len(rows)} rows, {len(columns)} columns")
-                                if columns and rows:
-                                    # Format Jira issues as passages
-                                    for row in rows[:10]:  # Limit to top 10 issues
-                                        # Convert row to text representation
-                                        row_text_parts = []
+                            logger.warning(f"Zendesk results missing 'data' key. Keys: {list(zendesk_results.keys())}")
+                    else:
+                        logger.debug("No Zendesk results to process")
+                    
+                    # Add Jira passages
+                    if jira_results:
+                        if 'error' in jira_results:
+                            logger.warning(f"Jira results contain error: {jira_results.get('error')}")
+                        elif 'data' in jira_results:
+                            data = jira_results['data']
+                            columns = data.get('columns', []) if isinstance(data, dict) else []
+                            rows = data.get('rows', []) if isinstance(data, dict) else []
+                            logger.info(f"Processing Jira passages: {len(rows)} rows, {len(columns)} columns")
+                            if columns and rows:
+                                # Format Jira issues as passages
+                                for row in rows[:10]:  # Limit to top 10 issues
+                                    # Convert row to text representation
+                                    row_text_parts = []
+                                    for i, col in enumerate(columns):
+                                        if i < len(row):
+                                            row_text_parts.append(f"{col}: {row[i]}")
+                                    issue_text = " | ".join(row_text_parts)
+                                    
+                                    if issue_text and len(issue_text.strip()) >= 10:
+                                        # Try to extract issue key and URL if available
+                                        issue_key = None
+                                        issue_url = ""
                                         for i, col in enumerate(columns):
-                                            if i < len(row):
-                                                row_text_parts.append(f"{col}: {row[i]}")
-                                        issue_text = " | ".join(row_text_parts)
+                                            if i < len(row) and col.lower() in ['key', 'issue_key', 'issue key', 'jira_key']:
+                                                issue_key = str(row[i])
+                                                issue_url = f"https://incorta.atlassian.net/browse/{issue_key}" if issue_key else ""
+                                                break
                                         
-                                        if issue_text and len(issue_text.strip()) >= 10:
-                                            # Try to extract issue key and URL if available
-                                            issue_key = None
-                                            issue_url = ""
-                                            for i, col in enumerate(columns):
-                                                if i < len(row) and col.lower() in ['key', 'issue_key', 'issue key', 'jira_key']:
-                                                    issue_key = str(row[i])
-                                                    issue_url = f"https://incorta.atlassian.net/browse/{issue_key}" if issue_key else ""
-                                                    break
-                                            
-                                            passages.append({
-                                                "source": "jira",
-                                                "text": issue_text,
-                                                "title": f"Jira Issue {issue_key or 'N/A'}",
-                                                "url": issue_url,
-                                                "score": 1.0  # Jira results are already filtered
-                                            })
-                                            logger.debug(f"Added Jira passage: Issue {issue_key}")
-                                else:
-                                    logger.warning(f"Jira data missing columns or rows. Columns: {len(columns)}, Rows: {len(rows)}")
+                                        passages.append({
+                                            "source": "jira",
+                                            "text": issue_text,
+                                            "title": f"Jira Issue {issue_key or 'N/A'}",
+                                            "url": issue_url,
+                                            "score": 1.0  # Jira results are already filtered
+                                        })
+                                        logger.debug(f"Added Jira passage: Issue {issue_key}")
                             else:
-                                logger.warning(f"Jira results missing 'data' key. Keys: {list(jira_results.keys())}")
+                                logger.warning(f"Jira data missing columns or rows. Columns: {len(columns)}, Rows: {len(rows)}")
                         else:
-                            logger.debug("No Jira results to process")
+                            logger.warning(f"Jira results missing 'data' key. Keys: {list(jira_results.keys())}")
+                    else:
+                        logger.debug("No Jira results to process")
+                    
+                    # Log passage count for debugging
+                    logger.info(f"Prepared {len(passages)} passages for answer generation")
+                    logger.info(f"Passage sources: {[p.get('source', 'unknown') for p in passages[:5]]}")
+                    
+                    # Use answer_with_citations for structured response with source mentions
+                    if passages:
+                        answer_result = answer_with_citations(user_input, passages)
                         
-                        # Log passage count for debugging
-                        logger.info(f"Prepared {len(passages)} passages for answer generation")
-                        logger.info(f"Passage sources: {[p.get('source', 'unknown') for p in passages[:5]]}")
-                        
-                        # Use answer_with_citations for structured response with source mentions
-                        if passages:
-                            answer_result = answer_with_citations(user_input, passages)
-                            
-                            if answer_result and answer_result.get("exists"):
-                                summary_text = answer_result.get("answer", "")
-                                logger.info("Generated answer with citations successfully")
-                            else:
-                                # If answer_with_citations failed, try fallback with better prompt
-                                logger.warning(f"answer_with_citations returned exists=false. Attempting fallback...")
-                                context_for_summary = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                                summary_prompt = (
-                                    "Based on the provided context, write a comprehensive answer to the user's question. "
-                                    "Begin by mentioning the source (e.g., 'According to the documentation...' or 'Based on Slack discussions...'). "
-                                    "For installation or step-by-step queries, provide clear numbered steps with headings.\n\n"
-                                    f"User question: {user_input}\n\nContext:\n{context_for_summary}"
-                                )
-                                summary_text = ask_gemini(summary_prompt, "") or "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
+                        if answer_result and answer_result.get("exists"):
+                            summary_text = answer_result.get("answer", "")
+                            logger.info("Generated answer with citations successfully")
                         else:
-                            logger.warning("No passages prepared - cannot generate answer")
-                            summary_text = "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
-                    except Exception as e:
-                        logger.error(f"Error generating structured answer: {e}", exc_info=True)
-                        # Fallback to simple summary
-                        try:
-                            context_for_summary = context or _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                            # If answer_with_citations failed, try fallback with better prompt
+                            logger.warning(f"answer_with_citations returned exists=false. Attempting fallback...")
+                            context_for_summary = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
                             summary_prompt = (
-                                "Write a concise answer answering the user's question directly. "
+                                "Based on the provided context, write a comprehensive answer to the user's question. "
                                 "Begin by mentioning the source (e.g., 'According to the documentation...' or 'Based on Slack discussions...'). "
                                 "For installation or step-by-step queries, provide clear numbered steps with headings.\n\n"
                                 f"User question: {user_input}\n\nContext:\n{context_for_summary}"
                             )
-                            summary_text = ask_gemini(summary_prompt, "") or ""
-                        except Exception:
-                            summary_text = "An error occurred while generating the answer. Please try again."
+                            summary_text = ask_gemini(summary_prompt, "") or "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
+                    else:
+                        logger.warning("No passages prepared - cannot generate answer")
+                        summary_text = "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
+                except Exception as e:
+                    logger.error(f"Error generating structured answer: {e}", exc_info=True)
+                    # Fallback to simple summary
+                    try:
+                        context_for_summary = context or _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
+                        summary_prompt = (
+                            "Write a concise answer answering the user's question directly. "
+                            "Begin by mentioning the source (e.g., 'According to the documentation...' or 'Based on Slack discussions...'). "
+                            "For installation or step-by-step queries, provide clear numbered steps with headings.\n\n"
+                            f"User question: {user_input}\n\nContext:\n{context_for_summary}"
+                        )
+                        summary_text = ask_gemini(summary_prompt, "") or ""
+                    except Exception:
+                        summary_text = "An error occurred while generating the answer. Please try again."
 
             grouped_output = _format_grouped_response(
                 summary_text,
