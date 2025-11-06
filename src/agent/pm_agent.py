@@ -383,16 +383,33 @@ def fetch_table_data(spark_sql: str) -> dict:
             result_data = response.json()
             # Log response structure for debugging
             if isinstance(result_data, dict):
-                columns = result_data.get("columns", [])
-                rows = result_data.get("rows", [])
+                # Check if data is nested in a 'data' key (common API pattern)
+                actual_data = result_data.get("data", result_data)
+                
+                # If actual_data is still a dict, check for columns/rows
+                if isinstance(actual_data, dict):
+                    columns = actual_data.get("columns", [])
+                    rows = actual_data.get("rows", [])
+                else:
+                    # If data is not a dict, try top-level
+                    columns = result_data.get("columns", [])
+                    rows = result_data.get("rows", [])
+                
                 logger.info(f"SQL query executed successfully. Returned {len(rows)} rows with {len(columns)} columns")
                 if len(rows) == 0:
                     logger.warning(f"SQL query returned 0 rows. Full query: {spark_sql}")
                     logger.warning(f"Response structure: {list(result_data.keys())}")
+                    logger.warning(f"Actual data type: {type(actual_data)}, Keys: {list(actual_data.keys()) if isinstance(actual_data, dict) else 'N/A'}")
+                    if isinstance(actual_data, dict):
+                        if "columns" in actual_data:
+                            logger.warning(f"Columns in actual_data: {actual_data.get('columns', [])}")
+                        if "rows" in actual_data:
+                            logger.warning(f"Number of rows in actual_data: {len(actual_data.get('rows', []))}")
+                    # Also check top-level
                     if "columns" in result_data:
-                        logger.warning(f"Columns in response: {result_data.get('columns', [])}")
+                        logger.warning(f"Columns in top-level: {result_data.get('columns', [])}")
                     if "rows" in result_data:
-                        logger.warning(f"Number of rows: {len(result_data.get('rows', []))}")
+                        logger.warning(f"Number of rows in top-level: {len(result_data.get('rows', []))}")
             return {"data": result_data}
         else:
             error_text = response.text

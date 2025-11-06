@@ -117,8 +117,14 @@ def _format_context(slack_messages: List[dict], confluence_pages: List[dict], do
     if zendesk_results and 'data' in zendesk_results:
         parts.append("=== Zendesk Tickets ===")
         data = zendesk_results['data']
-        columns = data.get('columns', [])
-        rows = data.get('rows', [])
+        # Handle nested data structure
+        if isinstance(data, dict) and 'data' in data:
+            actual_data = data['data']
+            columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
+            rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
+        else:
+            columns = data.get('columns', []) if isinstance(data, dict) else []
+            rows = data.get('rows', []) if isinstance(data, dict) else []
         if columns and rows:
             table_str = "Columns: " + ", ".join(columns) + "\n"
             for i, row in enumerate(rows, 1):
@@ -128,8 +134,14 @@ def _format_context(slack_messages: List[dict], confluence_pages: List[dict], do
     if jira_results and 'data' in jira_results:
         parts.append("=== Jira Issues ===")
         data = jira_results['data']
-        columns = data.get('columns', [])
-        rows = data.get('rows', [])
+        # Handle nested data structure
+        if isinstance(data, dict) and 'data' in data:
+            actual_data = data['data']
+            columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
+            rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
+        else:
+            columns = data.get('columns', []) if isinstance(data, dict) else []
+            rows = data.get('rows', []) if isinstance(data, dict) else []
         if columns and rows:
             table_str = "Columns: " + ", ".join(columns) + "\n"
             for i, row in enumerate(rows, 1):
@@ -293,8 +305,14 @@ def _render_sources(slack_messages: List[dict], confluence_pages: List[dict], do
             st.info("No Zendesk results found.")
         else:
             data = zendesk_results['data']
-            columns = data.get('columns', [])
-            rows = data.get('rows', [])
+            # Handle nested data structure
+            if isinstance(data, dict) and 'data' in data:
+                actual_data = data['data']
+                columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
+                rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
+            else:
+                columns = data.get('columns', []) if isinstance(data, dict) else []
+                rows = data.get('rows', []) if isinstance(data, dict) else []
             if columns and rows:
                 st.table({"Columns": columns, "Rows": rows})
 
@@ -303,8 +321,14 @@ def _render_sources(slack_messages: List[dict], confluence_pages: List[dict], do
             st.info("No Jira results found.")
         else:
             data = jira_results['data']
-            columns = data.get('columns', [])
-            rows = data.get('rows', [])
+            # Handle nested data structure
+            if isinstance(data, dict) and 'data' in data:
+                actual_data = data['data']
+                columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
+                rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
+            else:
+                columns = data.get('columns', []) if isinstance(data, dict) else []
+                rows = data.get('rows', []) if isinstance(data, dict) else []
             if columns and rows:
                 st.table({"Columns": columns, "Rows": rows})
 
@@ -987,8 +1011,16 @@ def main() -> None:
                             logger.warning(f"Zendesk results contain error: {zendesk_results.get('error')}")
                         elif 'data' in zendesk_results:
                             data = zendesk_results['data']
-                            columns = data.get('columns', []) if isinstance(data, dict) else []
-                            rows = data.get('rows', []) if isinstance(data, dict) else []
+                            # Handle nested data structure: API may return {metadata: {...}, data: {columns: [...], rows: [...]}}
+                            if isinstance(data, dict) and 'data' in data:
+                                # Nested structure: use data['data']
+                                actual_data = data['data']
+                                columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
+                                rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
+                            else:
+                                # Flat structure: columns/rows directly in data
+                                columns = data.get('columns', []) if isinstance(data, dict) else []
+                                rows = data.get('rows', []) if isinstance(data, dict) else []
                             logger.info(f"Processing Zendesk passages: {len(rows)} rows, {len(columns)} columns")
                             if columns and rows:
                                 # Format Zendesk tickets as passages
@@ -1031,8 +1063,16 @@ def main() -> None:
                             logger.warning(f"Jira results contain error: {jira_results.get('error')}")
                         elif 'data' in jira_results:
                             data = jira_results['data']
-                            columns = data.get('columns', []) if isinstance(data, dict) else []
-                            rows = data.get('rows', []) if isinstance(data, dict) else []
+                            # Handle nested data structure: API may return {metadata: {...}, data: {columns: [...], rows: [...]}}
+                            if isinstance(data, dict) and 'data' in data:
+                                # Nested structure: use data['data']
+                                actual_data = data['data']
+                                columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
+                                rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
+                            else:
+                                # Flat structure: columns/rows directly in data
+                                columns = data.get('columns', []) if isinstance(data, dict) else []
+                                rows = data.get('rows', []) if isinstance(data, dict) else []
                             logger.info(f"Processing Jira passages: {len(rows)} rows, {len(columns)} columns")
                             if columns and rows:
                                 # Format Jira issues as passages
