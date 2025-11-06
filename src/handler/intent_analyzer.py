@@ -544,9 +544,32 @@ def validate_intent(intent_data: Dict[str, Any]) -> Dict[str, Any]:
     conf_params.setdefault("priority_terms", [])
 
     # Heuristics: for doc-style queries, ensure knowledge_base is included
+    # Analyze query structure dynamically rather than using hard-coded terms
     ql = json.dumps(intent_data).lower()
-    doc_terms = ["how to", "install", "installation", "setup", "configure", "guide", "documentation", "on prem", "on-prem"]
-    if any(t in ql for t in doc_terms):
+    
+    # Extract query text from intent data for analysis
+    query_text = ""
+    if "reasoning" in intent_data:
+        query_text += intent_data["reasoning"] + " "
+    if "slack_params" in intent_data and "keywords" in intent_data["slack_params"]:
+        query_text += " ".join(intent_data["slack_params"]["keywords"]) + " "
+    if "confluence_params" in intent_data and "keywords" in intent_data["confluence_params"]:
+        query_text += " ".join(intent_data["confluence_params"]["keywords"])
+    
+    query_words = query_text.lower().split() if query_text else []
+    
+    # Check for explicit documentation mentions
+    explicit_doc_mentions = ["documentation", "docs", "doc", "guide", "manual", "kb", "knowledge base"]
+    has_explicit_mention = any(mention in ql for mention in explicit_doc_mentions)
+    
+    # Analyze query structure for procedural/instructional content
+    is_procedural = (
+        len(query_words) > 4 and
+        (ql.startswith("how ") or "how do" in ql or "how can" in ql or "how to" in ql) or
+        any(word in query_words for word in ["steps", "process", "procedure", "method", "way", "configure", "setup"])
+    )
+    
+    if has_explicit_mention or is_procedural:
         ds = set(intent_data.get("data_sources", []))
         ds.add("knowledge_base")
         intent_data["data_sources"] = list(ds)

@@ -646,15 +646,48 @@ def main() -> None:
                             
                             # Knowledge base (Docs) search: enable for doc-style queries even if not explicitly requested
                             def _should_search_docs(query: str) -> bool:
-                                q = (query or "").lower()
-                                doc_terms = [
-                                    "how to", "install", "installation", "setup", "configure",
-                                    "documentation", "doc", "guide", "on prem", "on-prem"
-                                ]
-                                return any(t in q for t in doc_terms)
+                                """
+                                Dynamically determine if documentation should be searched.
+                                Analyzes query structure rather than hard-coded terms.
+                                """
+                                if not query:
+                                    return False
+                                
+                                q = query.lower()
+                                query_words = q.split()
+                                
+                                # Check if query explicitly mentions documentation sources
+                                explicit_doc_mentions = ["documentation", "docs", "doc", "guide", "manual", "kb", "knowledge base"]
+                                if any(mention in q for mention in explicit_doc_mentions):
+                                    return True
+                                
+                                # Analyze query structure for procedural/instructional queries
+                                # Longer queries with question words often need documentation
+                                is_procedural_query = (
+                                    len(query_words) > 4 and
+                                    (q.startswith("how ") or "how do" in q or "how can" in q or "how to" in q) or
+                                    any(word in query_words for word in ["steps", "process", "procedure", "method", "way", "configure", "setup"])
+                                )
+                                
+                                # Questions about technical topics often need documentation
+                                is_technical_question = (
+                                    "?" in query and
+                                    any(word in query_words for word in ["what", "how", "why", "where", "when"]) and
+                                    len(query_words) > 3
+                                )
+                                
+                                return is_procedural_query or is_technical_question
 
                             if any(s in data_sources for s in ["docs", "knowledge_base"]) or _should_search_docs(user_input):
-                                futures["docs"] = pool.submit(search_docs_plain, user_input, 5)
+                                # Dynamically determine doc limit based on query structure
+                                # Longer, more complex queries may need more comprehensive documentation
+                                query_words = user_input.split()
+                                needs_comprehensive = (
+                                    len(query_words) > 6 or  # Longer queries often need more docs
+                                    "?" in user_input  # Questions may need comprehensive answers
+                                )
+                                doc_limit = 10 if needs_comprehensive else 5
+                                futures["docs"] = pool.submit(search_docs_plain, user_input, doc_limit)
                             
                             if "zendesk" in data_sources:
                                 zendesk_schema = fetch_schema_details("ZendeskTickets")

@@ -221,20 +221,28 @@ For **Troubleshooting & Solutions**:
 **Special Instructions:**
 - If passages are incomplete: State what's available and what's missing
 - If no relevant information found: Set exists=false, explain briefly
-- For step-by-step queries: Provide detailed numbered steps with clear headings (e.g., "**1. Prerequisites:**", "**2. Installation Steps:**")
+- For step-by-step queries: **CRITICAL** - Extract and include ALL actual steps from the documentation. DO NOT summarize. Include:
+  * All numbered steps (1., 2., 3., etc.) from the passages
+  * All commands, file paths, and configuration details
+  * All prerequisites and requirements
+  * Multiple installation methods if mentioned (Docker, bare-metal, etc.)
+  * Use clear headings (e.g., "**1. Prerequisites:**", "**2. Installation Steps:**")
 - DO NOT include hardcoded sections like "Actionable Insight for PMs" or "Installation Resources Found"
 - Integrate citations naturally into the answer text, not as separate lists
 - When mentioning Slack, include channel context (e.g., "According to Slack discussions in #channel-name...")
 - For recommendations: Make them specific to the query context, not generic PM advice
 - Use bold formatting for section headers and key terms in the answer
+- **IMPORTANT**: For installation guides, the answer should contain the actual steps, not just references to where they can be found
 
 Return strictly valid JSON. No markdown, no commentary, no explanations outside the JSON object.
 """
 
 
-def build_user_payload(query: str, passages: List[dict], max_chars_per_passage: int = 900) -> str:
+def build_user_payload(query: str, passages: List[dict], max_chars_per_passage: int = 900, query_type: Optional[str] = None) -> str:
     """
     Build JSON payload from query and passages.
+    
+    For step-by-step/installation queries, increase passage length to capture full instructions.
     
     Args:
         query: User query string
@@ -244,13 +252,55 @@ def build_user_payload(query: str, passages: List[dict], max_chars_per_passage: 
     Returns:
         JSON string of query and passages
     """
+    # Dynamically adjust passage length based on query structure and content
+    # Analyze query to determine if it requires detailed procedural content
+    query_lower = query.lower()
+    query_words = query_lower.split()
+    
+    # Detect queries that likely need detailed content (based on structure, not hard-coded terms)
+    # Look for patterns that indicate procedural/instructional queries
+    has_procedural_structure = (
+        len(query_words) > 4 and  # Longer queries often need more detail
+        any(word in query_words for word in ["how", "what", "steps", "process", "procedure", "method"]) or
+        query_lower.count("?") > 0  # Questions often need comprehensive answers
+    )
+    
+    # Check if passages contain structured content (numbered steps, lists, etc.)
+    has_structured_content = False
+    for p in passages[:3]:  # Check first few passages
+        text = (p.get("text") or p.get("excerpt") or "").lower()
+        # Look for numbered steps, lists, or structured formatting
+        if any(f"{i}." in text for i in range(1, 10)) or "step" in text or "procedure" in text:
+            has_structured_content = True
+            break
+    
+    # Increase passage length if query structure or content suggests detailed instructions needed
+    if has_procedural_structure or has_structured_content:
+        max_chars_per_passage = 2000  # Longer passages for detailed content
     blocks = []
     for p in passages:
         snippet = (p.get("text") or p.get("excerpt") or "").strip()
         if snippet:
-            # Truncate if too long
+            # For installation guides, try to preserve full content or at least longer snippets
+            # Only truncate if significantly longer than max
             if len(snippet) > max_chars_per_passage:
-                snippet = snippet[:max_chars_per_passage] + "..."
+                truncated = snippet[:max_chars_per_passage]
+                # Try to end at a sentence or step boundary for better readability
+                last_period = truncated.rfind('.')
+                last_newline = truncated.rfind('\n')
+                # Find last numbered step (1., 2., etc.)
+                last_number = -1
+                for i in range(1, 20):
+                    num_pos = truncated.rfind(f'{i}.')
+                    if num_pos > last_number:
+                        last_number = num_pos
+                
+                cut_point = max(last_period, last_newline, last_number)
+                if cut_point > max_chars_per_passage * 0.7:  # Only use cut point if it's not too early
+                    snippet = truncated[:cut_point + 1] + "..."
+                else:
+                    snippet = truncated + "..."
+            
             blocks.append({
                 "title": p.get("title", ""),
                 "url": p.get("url", ""),
@@ -317,13 +367,34 @@ def build_enhanced_prompt(
             "If date is uncertain, check multiple sources and note any discrepancies."
         )
 
-    if any(term in query_lower for term in ["how to", "configure", "setup", "implement", "install", "step by step", "step-by-step"]):
+    # Dynamically detect queries requiring detailed instructions based on query structure
+    # Analyze query to determine if it asks for procedural/instructional content
+    query_words = query_lower.split()
+    is_procedural_query = (
+        len(query_words) > 4 and  # Longer queries often need detailed answers
+        (query_lower.startswith("how ") or "how do" in query_lower or "how can" in query_lower) or
+        any(word in query_words for word in ["steps", "process", "procedure", "method", "way"])
+    )
+    
+    # Check if passages contain structured procedural content
+    passages_have_steps = False
+    for p in passages[:3]:
+        text = (p.get("text") or p.get("excerpt") or "").lower()
+        if any(f"{i}." in text for i in range(1, 10)) or "step" in text[:200]:
+            passages_have_steps = True
+            break
+    
+    if is_procedural_query or passages_have_steps:
         additional_instructions += (
-            "\n⚠️ HOW-TO/INSTALLATION QUERY: Prioritize knowledge_base and Confluence documentation. "
-            "MUST provide detailed step-by-step instructions with numbered steps and clear headings. "
-            "DO NOT summarize - provide actual installation steps from the documentation. "
-            "Integrate relevant information from Slack discussions naturally into the steps if helpful. "
-            "DO NOT create separate sections like 'Installation Resources Found' - weave citations into the answer."
+            "\n⚠️ CRITICAL: This query requires detailed procedural content.\n"
+            "You MUST extract and include ALL actual steps, procedures, or instructions from the documentation passages. "
+            "DO NOT just reference the documentation - you MUST include the actual numbered steps, commands, and instructions. "
+            "If the passages contain steps or procedures, you MUST reproduce them in your answer with proper formatting:\n"
+            "- Use numbered lists (1., 2., 3., etc.)\n"
+            "- Include all prerequisites, commands, and configuration details\n"
+            "- Preserve exact technical details (paths, commands, version numbers, file names)\n"
+            "- If multiple methods or approaches exist, include all of them\n"
+            "The user wants the ACTUAL STEPS/PROCEDURES from the passages, not a summary. Extract every relevant step and present them clearly."
         )
 
     if any(term in query_lower for term in ["customer", "issue", "problem", "bug", "ticket"]):
