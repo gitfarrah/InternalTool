@@ -384,17 +384,37 @@ def fetch_table_data(spark_sql: str) -> dict:
         
         if response.status_code == 200:
             result_data = response.json()
+            # Log full response structure for debugging
+            logger.debug(f"Full response structure: {type(result_data)}, Keys: {list(result_data.keys()) if isinstance(result_data, dict) else 'N/A'}")
+            
             # Log response structure for debugging
             if isinstance(result_data, dict):
                 # Check if data is nested in a 'data' key (common API pattern)
                 actual_data = result_data.get("data", result_data)
+                logger.debug(f"actual_data type: {type(actual_data)}, Value preview: {str(actual_data)[:200] if actual_data else 'None'}")
                 
-                # If actual_data is still a dict, check for columns/rows
+                # Handle different response structures
+                columns = []
+                rows = []
+                
                 if isinstance(actual_data, dict):
+                    # Standard structure: {columns: [...], rows: [...]}
                     columns = actual_data.get("columns", [])
                     rows = actual_data.get("rows", [])
+                elif isinstance(actual_data, list):
+                    # If data is a list, it might be rows directly
+                    # Try to get columns from metadata or infer from first row
+                    if result_data.get("metadata") and isinstance(result_data["metadata"], dict):
+                        columns = result_data["metadata"].get("columns", [])
+                    # If no columns in metadata, try to infer from first row
+                    if not columns and len(actual_data) > 0 and isinstance(actual_data[0], (list, dict)):
+                        if isinstance(actual_data[0], list):
+                            columns = [f"col_{i}" for i in range(len(actual_data[0]))]
+                        elif isinstance(actual_data[0], dict):
+                            columns = list(actual_data[0].keys())
+                    rows = actual_data
                 else:
-                    # If data is not a dict, try top-level
+                    # If data is not a dict or list, try top-level
                     columns = result_data.get("columns", [])
                     rows = result_data.get("rows", [])
                 
@@ -402,18 +422,45 @@ def fetch_table_data(spark_sql: str) -> dict:
                 if len(rows) == 0:
                     logger.warning(f"SQL query returned 0 rows. Full query: {spark_sql}")
                     logger.warning(f"Response structure: {list(result_data.keys())}")
-                    logger.warning(f"Actual data type: {type(actual_data)}, Keys: {list(actual_data.keys()) if isinstance(actual_data, dict) else 'N/A'}")
+                    logger.warning(f"Actual data type: {type(actual_data)}")
                     if isinstance(actual_data, dict):
+                        logger.warning(f"Actual data keys: {list(actual_data.keys())}")
                         if "columns" in actual_data:
                             logger.warning(f"Columns in actual_data: {actual_data.get('columns', [])}")
                         if "rows" in actual_data:
                             logger.warning(f"Number of rows in actual_data: {len(actual_data.get('rows', []))}")
+                    elif isinstance(actual_data, list):
+                        logger.warning(f"Actual data is a list with {len(actual_data)} items")
+                        if len(actual_data) > 0:
+                            logger.warning(f"First item type: {type(actual_data[0])}, Preview: {str(actual_data[0])[:200]}")
                     # Also check top-level
                     if "columns" in result_data:
                         logger.warning(f"Columns in top-level: {result_data.get('columns', [])}")
                     if "rows" in result_data:
                         logger.warning(f"Number of rows in top-level: {len(result_data.get('rows', []))}")
-            return {"data": result_data}
+                    if "metadata" in result_data:
+                        metadata = result_data.get("metadata")
+                        logger.warning(f"Metadata type: {type(metadata)}")
+                        if isinstance(metadata, dict):
+                            logger.warning(f"Metadata keys: {list(metadata.keys())}")
+                            logger.warning(f"Full metadata: {metadata}")
+                        else:
+                            logger.warning(f"Metadata value: {metadata}")
+                
+                # Normalize response to always have {columns: [...], rows: [...]} structure
+                # This ensures consistent format for the rest of the code
+                normalized_data = {
+                    "columns": columns,
+                    "rows": rows
+                }
+                # Preserve metadata if it exists
+                if isinstance(result_data, dict) and "metadata" in result_data:
+                    normalized_data["metadata"] = result_data["metadata"]
+                
+                return {"data": normalized_data}
+            else:
+                # If result_data is not a dict, return as-is
+                return {"data": result_data}
         else:
             error_text = response.text
             logger.error(f"SQL query execution failed with status {response.status_code}: {error_text}")
