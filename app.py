@@ -333,7 +333,88 @@ def generate_sql_for_schema(schema_name: str, query: str) -> str:
     Return ONLY the SQL query, no explanations, no markdown code blocks, just the raw SQL.
     """
     
-    sql_response = ask_gemini(sql_prompt, "")
+    # Try to get API manager for retry logic
+    try:
+        from src.api_manager import create_api_manager_from_env
+        api_manager = create_api_manager_from_env()
+        max_retries = len(api_manager.api_keys)
+    except Exception:
+        api_manager = None
+        max_retries = 1
+    
+    sql_response = ""
+    last_error = None
+    
+    # Call Gemini API directly with retry logic (since ask_gemini swallows exceptions)
+    import google.generativeai as genai
+    from src.handler.gemini_handler import DEFAULT_MODEL
+    
+    # Retry with different API keys if quota error occurs
+    for attempt in range(max_retries):
+        try:
+            if api_manager:
+                if attempt > 0:
+                    # Rotate to next API key
+                    api_manager.rotate_key()
+                    logger.info(f"Retrying SQL generation for {schema_name} with different API key (attempt {attempt + 1}/{max_retries})")
+                current_key = api_manager.api_keys[api_manager.current_index]
+            else:
+                # Fallback to single key
+                current_key = os.getenv("GEMINI_API_KEY")
+                if not current_key:
+                    logger.error(f"No API key available for {schema_name} SQL generation")
+                    return ""
+            
+            genai.configure(api_key=current_key)
+            model = genai.GenerativeModel(DEFAULT_MODEL)
+            
+            generation_config = {
+                "temperature": 0.1,
+                "top_p": 0.95,
+                "top_k": 40,
+                "max_output_tokens": 1000,
+            }
+            
+            resp = model.generate_content(sql_prompt, generation_config=generation_config)
+            sql_response = resp.text.strip() if hasattr(resp, "text") and resp.text else ""
+            
+            if sql_response and sql_response.strip():
+                if api_manager:
+                    api_manager.mark_success()
+                break  # Success, exit retry loop
+            else:
+                logger.warning(f"Gemini returned empty response for {schema_name} (attempt {attempt + 1}/{max_retries})")
+                
+        except Exception as e:
+            last_error = e
+            error_str = str(e).lower()
+            
+            if api_manager:
+                api_manager.mark_failure(error_type="quota" if "quota" in error_str or "429" in error_str else "generic")
+            
+            # Check if it's a quota/rate limit error
+            if any(keyword in error_str for keyword in ["quota", "429", "rate limit", "resourceexhausted"]):
+                logger.warning(f"Quota error for {schema_name} SQL generation (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    # Wait a bit before retrying with next key
+                    import time
+                    wait_time = 10  # Wait 10 seconds for quota to reset
+                    logger.info(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"All API keys exhausted for {schema_name} SQL generation")
+            else:
+                # Non-quota error, log and break
+                logger.error(f"Error generating SQL for {schema_name}: {e}")
+                break
+    
+    if not sql_response or not sql_response.strip():
+        if last_error:
+            logger.error(f"Failed to generate SQL for {schema_name} after {max_retries} attempts. Last error: {last_error}")
+        else:
+            logger.error(f"Failed to generate SQL for {schema_name}: Gemini returned empty response")
+        return ""
     
     # Strip markdown code blocks if present (```sql ... ``` or ``` ... ```)
     sql_cleaned = sql_response.strip()
@@ -352,6 +433,10 @@ def generate_sql_for_schema(schema_name: str, query: str) -> str:
     
     # Also handle case where markdown might be on same line as SQL
     sql_cleaned = sql_cleaned.replace("```sql", "").replace("```", "").strip()
+    
+    if not sql_cleaned:
+        logger.error(f"SQL cleaning resulted in empty string for {schema_name}")
+        return ""
     
     logger.info(f"Generated SQL for {schema_name}: {sql_cleaned[:100]}...")
     logger.debug(f"Full SQL query: {sql_cleaned}")

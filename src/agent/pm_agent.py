@@ -303,6 +303,9 @@ def fetch_schema_details(schema_name: str) -> dict:
 )
 def fetch_table_data(spark_sql: str) -> dict:
     """Fetch table data from the Incorta environment."""
+    # Log the SQL query being executed
+    logger.info(f"Executing SQL query: {spark_sql[:200]}..." if len(spark_sql) > 200 else f"Executing SQL query: {spark_sql}")
+    
     # Try to get credentials from Streamlit secrets first, then environment variables
     try:
         import streamlit as st
@@ -373,12 +376,24 @@ def fetch_table_data(spark_sql: str) -> dict:
         }
         
         params = {"sql": spark_sql}
+        logger.debug(f"Full SQL query being executed: {spark_sql}")
         response = requests.post(url, headers=headers, json=params, verify=True, timeout=60)
         
         if response.status_code == 200:
-            return {"data": response.json()}
+            result_data = response.json()
+            # Log response structure for debugging
+            if isinstance(result_data, dict):
+                columns = result_data.get("columns", [])
+                rows = result_data.get("rows", [])
+                logger.info(f"SQL query executed successfully. Returned {len(rows)} rows with {len(columns)} columns")
+                if len(rows) == 0:
+                    logger.warning(f"SQL query returned 0 rows. Query was: {spark_sql[:200]}...")
+                    logger.debug(f"Response structure: {list(result_data.keys())}")
+            return {"data": result_data}
         else:
-            return {"error": f"Failed to fetch data: {response.status_code} - {response.text}"}
+            error_text = response.text
+            logger.error(f"SQL query execution failed with status {response.status_code}: {error_text}")
+            return {"error": f"Failed to fetch data: {response.status_code} - {error_text}"}
     
     except Exception as e:
         logger.error(f"Failed to fetch table data: {e}")
