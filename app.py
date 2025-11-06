@@ -750,10 +750,28 @@ def main() -> None:
                                         docs_results = future.result(timeout=30)
                                     elif source == "zendesk":
                                         zendesk_results = future.result(timeout=60)
+                                        logger.info(f"Zendesk search completed. Results: {type(zendesk_results)}, Keys: {list(zendesk_results.keys()) if isinstance(zendesk_results, dict) else 'N/A'}")
+                                        if isinstance(zendesk_results, dict) and 'error' in zendesk_results:
+                                            logger.error(f"Zendesk search returned error: {zendesk_results.get('error')}")
+                                        elif isinstance(zendesk_results, dict) and 'data' in zendesk_results:
+                                            data = zendesk_results.get('data', {})
+                                            rows = data.get('rows', []) if isinstance(data, dict) else []
+                                            logger.info(f"Zendesk search returned {len(rows)} rows")
                                     elif source == "jira":
                                         jira_results = future.result(timeout=60)
+                                        logger.info(f"Jira search completed. Results: {type(jira_results)}, Keys: {list(jira_results.keys()) if isinstance(jira_results, dict) else 'N/A'}")
+                                        if isinstance(jira_results, dict) and 'error' in jira_results:
+                                            logger.error(f"Jira search returned error: {jira_results.get('error')}")
+                                        elif isinstance(jira_results, dict) and 'data' in jira_results:
+                                            data = jira_results.get('data', {})
+                                            rows = data.get('rows', []) if isinstance(data, dict) else []
+                                            logger.info(f"Jira search returned {len(rows)} rows")
                                 except Exception as e:
-                                    logger.error(f"{source.title()} search failed: {e}")
+                                    logger.error(f"{source.title()} search failed: {e}", exc_info=True)
+                                    if source == "zendesk":
+                                        zendesk_results = {"error": str(e)}
+                                    elif source == "jira":
+                                        jira_results = {"error": str(e)}
                                     if "timeout" in str(e).lower():
                                         st.warning(f"⏱️ {source.title()} search timed out.")
                                     else:
@@ -839,70 +857,92 @@ def main() -> None:
                                 logger.debug(f"Skipping Knowledge Base doc '{title}' - no text content (length: {len(text) if text else 0})")
                         
                         # Add Zendesk passages
-                        if zendesk_results and 'data' in zendesk_results and 'error' not in zendesk_results:
-                            data = zendesk_results['data']
-                            columns = data.get('columns', [])
-                            rows = data.get('rows', [])
-                            if columns and rows:
-                                # Format Zendesk tickets as passages
-                                for row in rows[:10]:  # Limit to top 10 tickets
-                                    # Convert row to text representation
-                                    row_text_parts = []
-                                    for i, col in enumerate(columns):
-                                        if i < len(row):
-                                            row_text_parts.append(f"{col}: {row[i]}")
-                                    ticket_text = " | ".join(row_text_parts)
-                                    
-                                    if ticket_text and len(ticket_text.strip()) >= 10:
-                                        # Try to extract ticket ID and URL if available
-                                        ticket_id = None
-                                        ticket_url = ""
+                        if zendesk_results:
+                            if 'error' in zendesk_results:
+                                logger.warning(f"Zendesk results contain error: {zendesk_results.get('error')}")
+                            elif 'data' in zendesk_results:
+                                data = zendesk_results['data']
+                                columns = data.get('columns', []) if isinstance(data, dict) else []
+                                rows = data.get('rows', []) if isinstance(data, dict) else []
+                                logger.info(f"Processing Zendesk passages: {len(rows)} rows, {len(columns)} columns")
+                                if columns and rows:
+                                    # Format Zendesk tickets as passages
+                                    for row in rows[:10]:  # Limit to top 10 tickets
+                                        # Convert row to text representation
+                                        row_text_parts = []
                                         for i, col in enumerate(columns):
-                                            if i < len(row) and col.lower() in ['id', 'ticket_id', 'ticket id']:
-                                                ticket_id = str(row[i])
-                                                ticket_url = f"https://incorta.zendesk.com/agent/tickets/{ticket_id}" if ticket_id else ""
-                                                break
+                                            if i < len(row):
+                                                row_text_parts.append(f"{col}: {row[i]}")
+                                        ticket_text = " | ".join(row_text_parts)
                                         
-                                        passages.append({
-                                            "source": "zendesk",
-                                            "text": ticket_text,
-                                            "title": f"Zendesk Ticket {ticket_id or 'N/A'}",
-                                            "url": ticket_url,
-                                            "score": 1.0  # Zendesk results are already filtered
-                                        })
+                                        if ticket_text and len(ticket_text.strip()) >= 10:
+                                            # Try to extract ticket ID and URL if available
+                                            ticket_id = None
+                                            ticket_url = ""
+                                            for i, col in enumerate(columns):
+                                                if i < len(row) and col.lower() in ['id', 'ticket_id', 'ticket id']:
+                                                    ticket_id = str(row[i])
+                                                    ticket_url = f"https://incorta.zendesk.com/agent/tickets/{ticket_id}" if ticket_id else ""
+                                                    break
+                                            
+                                            passages.append({
+                                                "source": "zendesk",
+                                                "text": ticket_text,
+                                                "title": f"Zendesk Ticket {ticket_id or 'N/A'}",
+                                                "url": ticket_url,
+                                                "score": 1.0  # Zendesk results are already filtered
+                                            })
+                                            logger.debug(f"Added Zendesk passage: Ticket {ticket_id}")
+                                else:
+                                    logger.warning(f"Zendesk data missing columns or rows. Columns: {len(columns)}, Rows: {len(rows)}")
+                            else:
+                                logger.warning(f"Zendesk results missing 'data' key. Keys: {list(zendesk_results.keys())}")
+                        else:
+                            logger.debug("No Zendesk results to process")
                         
                         # Add Jira passages
-                        if jira_results and 'data' in jira_results and 'error' not in jira_results:
-                            data = jira_results['data']
-                            columns = data.get('columns', [])
-                            rows = data.get('rows', [])
-                            if columns and rows:
-                                # Format Jira issues as passages
-                                for row in rows[:10]:  # Limit to top 10 issues
-                                    # Convert row to text representation
-                                    row_text_parts = []
-                                    for i, col in enumerate(columns):
-                                        if i < len(row):
-                                            row_text_parts.append(f"{col}: {row[i]}")
-                                    issue_text = " | ".join(row_text_parts)
-                                    
-                                    if issue_text and len(issue_text.strip()) >= 10:
-                                        # Try to extract issue key and URL if available
-                                        issue_key = None
-                                        issue_url = ""
+                        if jira_results:
+                            if 'error' in jira_results:
+                                logger.warning(f"Jira results contain error: {jira_results.get('error')}")
+                            elif 'data' in jira_results:
+                                data = jira_results['data']
+                                columns = data.get('columns', []) if isinstance(data, dict) else []
+                                rows = data.get('rows', []) if isinstance(data, dict) else []
+                                logger.info(f"Processing Jira passages: {len(rows)} rows, {len(columns)} columns")
+                                if columns and rows:
+                                    # Format Jira issues as passages
+                                    for row in rows[:10]:  # Limit to top 10 issues
+                                        # Convert row to text representation
+                                        row_text_parts = []
                                         for i, col in enumerate(columns):
-                                            if i < len(row) and col.lower() in ['key', 'issue_key', 'issue key', 'jira_key']:
-                                                issue_key = str(row[i])
-                                                issue_url = f"https://incorta.atlassian.net/browse/{issue_key}" if issue_key else ""
-                                                break
+                                            if i < len(row):
+                                                row_text_parts.append(f"{col}: {row[i]}")
+                                        issue_text = " | ".join(row_text_parts)
                                         
-                                        passages.append({
-                                            "source": "jira",
-                                            "text": issue_text,
-                                            "title": f"Jira Issue {issue_key or 'N/A'}",
-                                            "url": issue_url,
-                                            "score": 1.0  # Jira results are already filtered
-                                        })
+                                        if issue_text and len(issue_text.strip()) >= 10:
+                                            # Try to extract issue key and URL if available
+                                            issue_key = None
+                                            issue_url = ""
+                                            for i, col in enumerate(columns):
+                                                if i < len(row) and col.lower() in ['key', 'issue_key', 'issue key', 'jira_key']:
+                                                    issue_key = str(row[i])
+                                                    issue_url = f"https://incorta.atlassian.net/browse/{issue_key}" if issue_key else ""
+                                                    break
+                                            
+                                            passages.append({
+                                                "source": "jira",
+                                                "text": issue_text,
+                                                "title": f"Jira Issue {issue_key or 'N/A'}",
+                                                "url": issue_url,
+                                                "score": 1.0  # Jira results are already filtered
+                                            })
+                                            logger.debug(f"Added Jira passage: Issue {issue_key}")
+                                else:
+                                    logger.warning(f"Jira data missing columns or rows. Columns: {len(columns)}, Rows: {len(rows)}")
+                            else:
+                                logger.warning(f"Jira results missing 'data' key. Keys: {list(jira_results.keys())}")
+                        else:
+                            logger.debug("No Jira results to process")
                         
                         # Log passage count for debugging
                         logger.info(f"Prepared {len(passages)} passages for answer generation")
