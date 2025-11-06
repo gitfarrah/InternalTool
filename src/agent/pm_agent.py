@@ -21,6 +21,32 @@ from ..storage.cache_manager import get_cached_search_results, cache_search_resu
 logger = logging.getLogger(__name__)
 
 
+def _get_secret_or_env(name: str, default: str = "") -> str:
+    """
+    Get value from Streamlit secrets first, then fall back to environment variables.
+    
+    Args:
+        name: Name of the secret/environment variable
+        default: Default value if not found
+    
+    Returns:
+        Value from Streamlit secrets or environment variable
+    """
+    # Try Streamlit secrets first (if available and in Streamlit context)
+    try:
+        import streamlit as st
+        # Check if we're in a Streamlit context and if the secret exists
+        if hasattr(st, 'secrets') and name in st.secrets:
+            return st.secrets.get(name, default)
+    except Exception:
+        # Streamlit not available, not in Streamlit context, or any error
+        # Fall through to environment variables
+        pass
+    
+    # Fall back to environment variables (loaded from .env by load_dotenv())
+    return os.getenv(name, default)
+
+
 # =========================
 # Agent Tools
 # =========================
@@ -91,9 +117,22 @@ def search_slack_messages(
     if not query or not query.strip():
         return []
 
-    # Create intent data for the search system
-    query_terms = query.lower().split()
-    keywords = [term for term in query_terms if len(term) > 2]
+    # Use stopwords filtering for better relevance
+    query_words = set(query.lower().split())
+    stop_words = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of",
+        "with", "by", "is", "are", "was", "were", "be", "been", "have", "has",
+        "had", "do", "does", "did", "will", "would", "could", "should", "may",
+        "might", "can", "what", "when", "where", "why", "how", "who", "which",
+        "updates", "about", "on"
+    }
+    distinct_words = [word for word in query_words if word not in stop_words and len(word) > 2]
+
+    # Create intent data for the search system with filtered keywords
+    if distinct_words:
+        keywords = distinct_words
+    else:
+        keywords = [term for term in query.lower().split() if len(term) > 2]
     priority_terms = keywords[:3]  # Top 3 terms as priority
 
     intent_data = {
@@ -101,14 +140,27 @@ def search_slack_messages(
             "keywords": keywords,
             "priority_terms": priority_terms,
             "channels": channel_filter if channel_filter else "all",
-            "time_range": "all",  # Repository system searches all history
+            "time_range": "all",
             "limit": max_results
         },
         "search_strategy": "fuzzy_match"
     }
 
-    # Use the simplified search
-    results = search_slack(query, intent_data, max_results)
+    logger.info(f"Optimized Slack search with keywords: {keywords}, channel_filter: {channel_filter}")
+
+    # Use the search_slack function with user_token from session state
+    try:
+        import streamlit as st
+        user_token = st.session_state.get("slack_token") if hasattr(st, 'session_state') else None
+    except Exception:
+        user_token = None
+
+    # DEBUG: Log token status
+    token_status = "present" if user_token else "MISSING"
+    token_prefix = user_token[:10] if user_token else "None"
+    logger.warning(f"🔐 Slack token status: {token_status} (prefix: {token_prefix}...)")
+
+    results = search_slack(query, intent_data, max_results, user_token)
     
     # Convert to legacy format for compatibility
     legacy_results = []
@@ -135,22 +187,35 @@ def _search_docs_impl(query: str, limit: int = 5) -> List[dict]:
     
     try:
         # Support env vars and Streamlit secrets
-        qdrant_url = os.getenv("QDRANT_URL") or os.getenv("QDRANT_HOST")
-        qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
-        if not qdrant_url:
-            try:
-                import streamlit as st  # optional
-                qdrant_url = st.secrets.get("QDRANT_URL", "") or st.secrets.get("QDRANT_HOST", "")
-                qdrant_api_key = st.secrets.get("QDRANT_API_KEY", qdrant_api_key)
-            except Exception:
-                pass
+        qdrant_url = _get_secret_or_env("QDRANT_URL") or _get_secret_or_env("QDRANT_HOST")
+        qdrant_api_key = _get_secret_or_env("QDRANT_API_KEY", "")
+        
         if not qdrant_url:
             logger.warning("QDRANT_URL not set; knowledge base search disabled")
             return []
 
+        # Use stopwords filtering for better relevance
+        query_words = set(query.lower().split())
+        stop_words = {
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of",
+            "with", "by", "is", "are", "was", "were", "be", "been", "have", "has",
+            "had", "do", "does", "did", "will", "would", "could", "should", "may",
+            "might", "can", "what", "when", "where", "why", "how", "who", "which",
+            "updates", "about", "on"
+        }
+        distinct_words = [word for word in query_words if word not in stop_words and len(word) > 2]
+
+        # Build optimized search query
+        if distinct_words:
+            search_query = " ".join(distinct_words)
+        else:
+            search_query = query
+
+        logger.info(f"Optimized docs search query: {search_query}")
+
         client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
         embedding_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2", device="cpu")
-        query_vector = embedding_model.encode([query])[0]
+        query_vector = embedding_model.encode([search_query])[0]
 
         search_result = client.search(
             collection_name="docs",
@@ -159,7 +224,7 @@ def _search_docs_impl(query: str, limit: int = 5) -> List[dict]:
             with_payload=True
         )
         
-        # Format results
+        # Format results with lower threshold for better recall
         formatted_results = []
         for r in search_result:
             if r.score >= 0.2:  # Lower threshold to avoid over-filtering
@@ -171,6 +236,7 @@ def _search_docs_impl(query: str, limit: int = 5) -> List[dict]:
                     "source": "knowledge_base"
                 })
         
+        logger.info(f"Returning {len(formatted_results)} knowledge base results")
         return formatted_results
     except Exception as e:
         logger.error(f"Failed to search docs: {e}")
@@ -210,19 +276,10 @@ def search_docs_plain(query: str, limit: int = 5) -> List[dict]:
 )
 def fetch_schema_details(schema_name: str) -> dict:
     """Fetch schema details from the Incorta environment."""
-    # Try to get credentials from Streamlit secrets first, then environment variables
-    try:
-        import streamlit as st
-        env_url = st.secrets.get("INCORTA_ENV_URL") or os.getenv("INCORTA_ENV_URL")
-        tenant = st.secrets.get("INCORTA_TENANT") or os.getenv("INCORTA_TENANT")
-        user = st.secrets.get("INCORTA_USERNAME") or os.getenv("INCORTA_USERNAME")
-        password = st.secrets.get("INCORTA_PASSWORD") or os.getenv("INCORTA_PASSWORD")
-    except Exception:
-        # If not in Streamlit context, use environment variables only
-        env_url = os.getenv("INCORTA_ENV_URL")
-        tenant = os.getenv("INCORTA_TENANT")
-        user = os.getenv("INCORTA_USERNAME")
-        password = os.getenv("INCORTA_PASSWORD")
+    env_url = _get_secret_or_env("INCORTA_ENV_URL")
+    tenant = _get_secret_or_env("INCORTA_TENANT")
+    user = _get_secret_or_env("INCORTA_USERNAME")
+    password = _get_secret_or_env("INCORTA_PASSWORD")
     
     if not all([env_url, tenant, user, password]):
         error_msg = "Missing Incorta credentials. Set INCORTA_ENV_URL, INCORTA_TENANT, INCORTA_USERNAME, INCORTA_PASSWORD in environment variables or Streamlit secrets"
@@ -321,19 +378,10 @@ def fetch_table_data(spark_sql: str) -> dict:
     # Log the SQL query being executed
     logger.info(f"Executing SQL query: {spark_sql[:200]}..." if len(spark_sql) > 200 else f"Executing SQL query: {spark_sql}")
     
-    # Try to get credentials from Streamlit secrets first, then environment variables
-    try:
-        import streamlit as st
-        env_url = st.secrets.get("INCORTA_ENV_URL") or os.getenv("INCORTA_ENV_URL")
-        tenant = st.secrets.get("INCORTA_TENANT") or os.getenv("INCORTA_TENANT")
-        user = st.secrets.get("INCORTA_USERNAME") or os.getenv("INCORTA_USERNAME")
-        password = st.secrets.get("INCORTA_PASSWORD") or os.getenv("INCORTA_PASSWORD")
-    except Exception:
-        # If not in Streamlit context, use environment variables only
-        env_url = os.getenv("INCORTA_ENV_URL")
-        tenant = os.getenv("INCORTA_TENANT")
-        user = os.getenv("INCORTA_USERNAME")
-        password = os.getenv("INCORTA_PASSWORD")
+    env_url = _get_secret_or_env("INCORTA_ENV_URL")
+    tenant = _get_secret_or_env("INCORTA_TENANT")
+    user = _get_secret_or_env("INCORTA_USERNAME")
+    password = _get_secret_or_env("INCORTA_PASSWORD")
     
     if not all([env_url, tenant, user, password]):
         error_msg = "Missing Incorta credentials. Set INCORTA_ENV_URL, INCORTA_TENANT, INCORTA_USERNAME, INCORTA_PASSWORD in environment variables or Streamlit secrets"
@@ -647,7 +695,7 @@ def create_pm_agent(api_key: Optional[str] = None):
             logger.info(f"Agent: Using API manager with {len(api_manager.api_keys)} key(s)")
         except Exception as e:
             logger.warning(f"Agent: Failed to create API manager: {e}, using single key")
-            api_key = os.getenv("GEMINI_API_KEY")
+            api_key = _get_secret_or_env("GEMINI_API_KEY")
 
     if not api_manager and not api_key:
         raise ValueError("GEMINI_API_KEY must be set in environment or provided as argument")
