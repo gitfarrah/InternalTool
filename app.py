@@ -389,56 +389,60 @@ def main() -> None:
                 expected_state = st.session_state.get("slack_oauth_state", "")
                 if expected_state and returned_state != expected_state:
                     st.error("❌ Authentication failed: invalid_state. Please try again.")
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-                st.stop()
-
-                # Check if this code was already processed
-                processed_code = st.session_state.get("processed_oauth_code", "")
-                if processed_code == oauth_code:
-                    logger.info("OAuth code already processed, clearing params and continuing")
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-                    # Ensure chat state exists
+                    try:
+                        st.query_params.clear()
+                    except Exception:
+                        pass
+                    # Don't stop - allow user to continue
                     if "chat_messages" not in st.session_state:
                         st.session_state["chat_messages"] = [
                             {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
                         ]
-                    # Continue without rerun
                 else:
-                    # Process the OAuth code
-                    logger.info("Processing OAuth code...")
-                    token = exchange_code_for_token(oauth_code)
-            user_info = get_user_info(token)
-            st.session_state["slack_token"] = token
-            st.session_state["slack_user_name"] = user_info.get("name", "User")
-            st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
-            st.session_state["slack_user_id"] = user_info.get("id", "")
-            st.session_state["processed_oauth_code"] = oauth_code  # Mark code as processed
-                    
-            # Ensure chat_messages exists after OAuth
-            if "chat_messages" not in st.session_state:
-                st.session_state["chat_messages"] = [
-                    {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-                ]
-                logger.info("Reinitialized chat_messages after OAuth")
-            
-            logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
-            logger.info(f"Chat messages after OAuth: {len(st.session_state.get('chat_messages', []))} messages")
-            
-            # Clear URL params BEFORE showing success message
-            try:
-                st.query_params.clear()
-            except Exception:
-                pass
-                    
-            st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
-                    # Rerun to reload page without OAuth params
-            st.rerun()
+                    # Check if this code was already processed
+                    processed_code = st.session_state.get("processed_oauth_code", "")
+                    if processed_code == oauth_code:
+                        logger.info("OAuth code already processed, clearing params and continuing")
+                        try:
+                            st.query_params.clear()
+                        except Exception:
+                            pass
+                        # Ensure chat state exists
+                        if "chat_messages" not in st.session_state:
+                            st.session_state["chat_messages"] = [
+                                {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+                            ]
+                        # Continue without rerun
+                    else:
+                        # Process the OAuth code
+                        logger.info("Processing OAuth code...")
+                        token = exchange_code_for_token(oauth_code)
+                        user_info = get_user_info(token)
+                        st.session_state["slack_token"] = token
+                        st.session_state["slack_user_name"] = user_info.get("name", "User")
+                        st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
+                        st.session_state["slack_user_id"] = user_info.get("id", "")
+                        st.session_state["processed_oauth_code"] = oauth_code  # Mark code as processed
+                        
+                        # Ensure chat_messages exists after OAuth
+                        if "chat_messages" not in st.session_state:
+                            st.session_state["chat_messages"] = [
+                                {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
+                            ]
+                            logger.info("Reinitialized chat_messages after OAuth")
+                        
+                        logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
+                        logger.info(f"Chat messages after OAuth: {len(st.session_state.get('chat_messages', []))} messages")
+                        
+                        # Clear URL params BEFORE showing success message
+                        try:
+                            st.query_params.clear()
+                        except Exception:
+                            pass
+                        
+                        st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
+                        # Rerun to reload page without OAuth params
+                        st.rerun()
         except Exception as e:
             msg = str(e)
             logger.error(f"OAuth error: {msg}", exc_info=True)
