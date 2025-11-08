@@ -1,32 +1,17 @@
-from __future__ import annotations
-
 import os
-import sys
-
-# Ensure project root is on sys.path for package imports on all platforms
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-
+import html
 import logging
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List
-import json
-from datetime import datetime
 
 import streamlit as st
+from dotenv import load_dotenv
 
-from src.handler.confluence_handler import search_confluence_optimized
-from src.handler.gemini_handler import ask_gemini, answer_with_citations
-from src.handler.intent_analyzer import analyze_user_intent, validate_intent
-from src.handler.slack_handler import search_slack
 from src.storage.cache_manager import (
-    get_cached_search_results, cache_search_results,
-    get_cached_intent_analysis, cache_intent_analysis,
+    get_cached_search_results,
+    cache_search_results,
     get_cache_manager
 )
-from src.agent.pm_agent import search_docs_plain, fetch_schema_details, fetch_table_data  # Integrated tools from other code
+from src.agent import create_pm_agent
+from src.auth import get_session_manager
 from src.handler.oauth_handler import (
     get_oauth_url,
     exchange_code_for_token,
@@ -34,473 +19,31 @@ from src.handler.oauth_handler import (
     is_token_valid,
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Setup logger
 logger = logging.getLogger(__name__)
 
-# Page config
-st.set_page_config(page_title="Incorta AI Search Assistant", page_icon="incorta.png", layout="wide")
+# =========================
+# Environment & Config
+# =========================
 
-def _validate_env() -> List[str]:
-    """Return a list of missing required environment variables."""
-    missing = []
-    if not st.secrets.get("SLACK_USER_TOKEN"):
-        missing.append("SLACK_USER_TOKEN")
-    if not st.secrets.get("CONFLUENCE_URL"):
-        missing.append("CONFLUENCE_URL")
-    if not st.secrets.get("CONFLUENCE_EMAIL"):
-        missing.append("CONFLUENCE_EMAIL")
-    if not st.secrets.get("CONFLUENCE_API_TOKEN"):
-        missing.append("CONFLUENCE_API_TOKEN")
-    if not st.secrets.get("GEMINI_API_KEY"):
-        missing.append("GEMINI_API_KEY")
-    # Added from other code for new sources
-    if not st.secrets.get("QDRANT_URL"):
-        missing.append("QDRANT_URL")
-    if not st.secrets.get("INCORTA_ENV_URL"):
-        missing.append("INCORTA_ENV_URL")
-    if not st.secrets.get("INCORTA_TENANT"):
-        missing.append("INCORTA_TENANT")
-    if not st.secrets.get("INCORTA_USERNAME"):
-        missing.append("INCORTA_USERNAME")
-    if not st.secrets.get("INCORTA_PASSWORD"):
-        missing.append("INCORTA_PASSWORD")
-    return missing
+load_dotenv()
 
-def _clean_slack_text(text: str) -> str:
-    import re
-    
-    text = re.sub(r'<#[A-Z0-9]+\|([^>]+)>', r'#\1', text)
-    text = re.sub(r'<(https?://[^|>]+)\|([^>]+)>', r'\2 (\1)', text)
-    text = re.sub(r'<(https?://[^>]+)>', r'\1', text)
-    text = re.sub(r'<@[A-Z0-9]+\|([^>]+)>', r'@\1', text)
-    text = re.sub(r'<@([A-Z0-9]+)>', r'@unknown_user', text)
-    # Handle special mentions
-    text = text.replace('<!channel>', '@channel')
-    text = text.replace('<!here>', '@here')
-    text = text.replace('<!everyone>', '@everyone')
-    
-    return text
+# Page config (do this as early as possible)
+st.set_page_config(
+    page_title="Internal PM Chat",
+    page_icon="💬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-def _format_context(slack_messages: List[dict], confluence_pages: List[dict], docs_results: List[dict], zendesk_results: dict, jira_results: dict) -> str:
-    parts: List[str] = []
+# =========================
+# Slack Authentication (using Farah's oauth_handler approach)
+# =========================
 
-    if slack_messages:
-        parts.append("=== Slack Messages ===")
-        for i, m in enumerate(slack_messages, start=1):
-            timestamp = m.get('date', 'Unknown date')
-            meta = f"[# {m.get('channel','?')} | @{m.get('username','?')} | {timestamp}]"
-            clean_text = _clean_slack_text(m.get('text','').strip())
-            line = f"{i}. {meta}\n{clean_text}\nSource: {m.get('permalink','')}\n"
-            parts.append(line)
-
-    if confluence_pages:
-        parts.append("=== Confluence Pages ===")
-        for i, p in enumerate(confluence_pages, start=1):
-            meta = f"[{p.get('space','?')} | last modified: {p.get('last_modified','?')}]"
-            excerpt = (p.get('excerpt') or '').strip()
-            line = f"{i}. {p.get('title','Untitled')} {meta}\nExcerpt: {excerpt}\nSource: {p.get('url','')}\n"
-            parts.append(line)
-
-    # Added from other code
-    if docs_results:
-        parts.append("=== Knowledge Base (Docs) ===")
-        for i, d in enumerate(docs_results, start=1):
-            meta = f"[Score: {d.get('score', 0.0):.2f}]"
-            text = (d.get('text') or '').strip()
-            line = f"{i}. {d.get('title','Untitled')} {meta}\nExcerpt: {text[:300]}\nSource: {d.get('url','')}\n"
-            parts.append(line)
-
-    if zendesk_results and 'data' in zendesk_results:
-        parts.append("=== Zendesk Tickets ===")
-        data = zendesk_results['data']
-        # Handle nested data structure
-        if isinstance(data, dict) and 'data' in data:
-            actual_data = data['data']
-            columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
-            rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
-        else:
-            columns = data.get('columns', []) if isinstance(data, dict) else []
-            rows = data.get('rows', []) if isinstance(data, dict) else []
-        if columns and rows:
-            table_str = "Columns: " + ", ".join(columns) + "\n"
-            for i, row in enumerate(rows, 1):
-                table_str += f"Row {i}: " + str(row) + "\n"
-            parts.append(table_str)
-
-    if jira_results and 'data' in jira_results:
-        parts.append("=== Jira Issues ===")
-        data = jira_results['data']
-        # Handle nested data structure
-        if isinstance(data, dict) and 'data' in data:
-            actual_data = data['data']
-            columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
-            rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
-        else:
-            columns = data.get('columns', []) if isinstance(data, dict) else []
-            rows = data.get('rows', []) if isinstance(data, dict) else []
-        if columns and rows:
-            table_str = "Columns: " + ", ".join(columns) + "\n"
-            for i, row in enumerate(rows, 1):
-                table_str += f"Row {i}: " + str(row) + "\n"
-            parts.append(table_str)
-
-    return "\n".join(parts)
-
-
-def _group_slack_by_channel_date(slack_results: List[dict]) -> dict:
-    grouped = {}
-    for m in slack_results or []:
-        channel = f"#{(m.get('channel') or 'unknown').lstrip('#')}"
-        date_str = m.get('date') or m.get('ts') or 'Unknown date'
-        date_key = date_str.split(' ')[0] if isinstance(date_str, str) else str(date_str)
-        text = (m.get('text') or '').strip().replace('\n', ' ')
-        if len(text) > 200:
-            text = text[:200] + '...'
-        grouped.setdefault(channel, {}).setdefault(date_key, []).append(text)
-    for channel in grouped:
-        grouped[channel] = dict(sorted(grouped[channel].items()))
-    return dict(sorted(grouped.items()))
-
-
-def _group_confluence_by_space(pages: List[dict]) -> dict:
-    grouped = {"Confluence": {}}
-    buckets = {}
-    for p in pages or []:
-        parent = p.get('space') or 'General'
-        child = p.get('title') or 'Untitled'
-        buckets.setdefault(parent, set()).add(child)
-    for parent, children in buckets.items():
-        grouped["Confluence"][parent] = {
-            "title": parent,
-            "children": sorted(list(children))
-        }
-    return grouped
-
-
-def _format_grouped_response(summary: str, slack_results: List[dict], conf_results: List[dict]) -> str:
-    slack_grouped = _group_slack_by_channel_date(slack_results)
-    conf_grouped = _group_confluence_by_space(conf_results)
-
-    lines = []
-    if summary and summary.strip():
-        lines.append(f"**Summary:** {summary.strip()}")
-        lines.append("")
-
-    lines.append("**Slack Messages:**")
-    lines.append("")
-    if slack_grouped:
-        idx = 1
-        for channel, dates in slack_grouped.items():
-            lines.append(f"{idx}. **Channel: {channel}**")
-            for date_key, msgs in dates.items():
-                preview = ", ".join(msgs[:6])
-                lines.append(f"   - {date_key}: {preview}")
-            lines.append("")
-            idx += 1
-    else:
-        lines.append("(no Slack messages found)")
-        lines.append("")
-
-    lines.append("**Confluence Pages:**")
-    lines.append("")
-    if conf_grouped.get("Confluence"):
-        lines.append("3. **Confluence**")
-        for parent, info in conf_grouped["Confluence"].items():
-            lines.append(f"   - Parent Wiki: {parent}")
-            for child in info.get("children", [])[:10]:
-                lines.append(f"     - Child: {child}")
-        lines.append("")
-    else:
-        lines.append("(no Confluence pages found)")
-
-    return "\n".join(lines)
-
-
-def _render_sources(slack_messages: List[dict], confluence_pages: List[dict], docs_results: List[dict], zendesk_results: dict, jira_results: dict) -> None:
-    with st.expander(f"Slack Messages ({len(slack_messages)} found)", expanded=False):
-        if not slack_messages:
-            st.info("No Slack results found.")
-        else:
-            for idx, m in enumerate(slack_messages, 1):
-                channel = m.get('channel', 'Unknown')
-                username = m.get('username', 'Unknown')
-                timestamp = m.get('date', m.get('ts', ''))
-                text = _clean_slack_text(m.get('text', '').strip())
-                permalink = m.get('permalink', '')
-                relevance_score = m.get('relevance_score', 0.0)
-                import html
-                text_escaped = html.escape(text)
-                st.markdown(f"""
-                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #4A90E2;">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-                        <span style="font-weight: 600; color: #1f1f1f;">#{channel}</span>
-                        <div style="display: flex; gap: 10px; align-items: center;">
-                        <span style="color: #666; font-size: 0.9em;">{timestamp}</span>
-                            <span style="color: #888; font-size: 0.9em;">Score: {relevance_score:.2f}</span>
-                        </div>
-                    </div>
-                    <div style="color: #4A90E2; font-size: 0.9em; margin-bottom: 10px;">@{username}</div>
-                    <div style="color: #1f1f1f; line-height: 1.6; margin-bottom: 10px; white-space: pre-wrap;">{text_escaped}</div>
-                    <a href="{permalink}" target="_blank" style="color: #4A90E2; text-decoration: none; font-size: 0.9em;">View in Slack</a>
-                </div>
-                """, unsafe_allow_html=True)
-
-    with st.expander(f"Confluence Pages ({len(confluence_pages)} found)", expanded=False):
-        if not confluence_pages:
-            st.info("No Confluence results found.")
-        else:
-            for idx, p in enumerate(confluence_pages, 1):
-                title = p.get('title', 'Untitled')
-                space = p.get('space', 'Unknown')
-                last_modified = p.get('last_modified', 'Unknown')
-                excerpt = (p.get('excerpt') or '').strip()
-                url = p.get('url', '')
-                score = p.get('score', 0.0)
-                import re
-                cleaned_excerpt = re.sub(r'@@@hl@@@(.*?)@@@endhl@@@', r'\1', excerpt)
-                cleaned_excerpt = re.sub(r'<[^>]+>', '', cleaned_excerpt)
-                cleaned_excerpt = cleaned_excerpt.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-                if len(cleaned_excerpt) > 300:
-                    cleaned_excerpt = cleaned_excerpt[:300] + '...'
-                st.markdown(f"""
-                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #6B46C1;">
-                    <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{title}</div>
-                    <div style="display: flex; gap: 15px; margin-bottom: 10px; font-size: 0.9em;">
-                        <span style="color: #6B46C1; font-weight: 500;">{space}</span>
-                        <span style="color: #666;">{last_modified}</span>
-                        <span style="color: #888;">Score: {score:.2f}</span>
-                    </div>
-                    <div style="color: #444; line-height: 1.6; margin-bottom: 10px; font-style: italic;">{cleaned_excerpt}</div>
-                    <a href="{url}" target="_blank" style="color: #6B46C1; text-decoration: none; font-size: 0.9em;">Open Page</a>
-                </div>
-                """, unsafe_allow_html=True)
-
-    # Added render for new sources
-    with st.expander(f"Knowledge Base Docs ({len(docs_results)} found)", expanded=False):
-        if not docs_results:
-            st.info("No docs results found.")
-        else:
-            for idx, d in enumerate(docs_results, 1):
-                title = d.get('title', 'Untitled')
-                url = d.get('url', '')
-                text = (d.get('text') or '').strip()
-                score = d.get('score', 0.0)
-                if len(text) > 300:
-                    text = text[:300] + '...'
-                st.markdown(f"""
-                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #28a745;">
-                    <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{title}</div>
-                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score:.2f}</div>
-                    <div style="color: #444; line-height: 1.6; margin-bottom: 10px;">{text}</div>
-                    <a href="{url}" target="_blank" style="color: #28a745; text-decoration: none; font-size: 0.9em;">Open Document</a>
-                </div>
-                """, unsafe_allow_html=True)
-
-    with st.expander(f"Zendesk Tickets (Results found)", expanded=False):
-        if not zendesk_results or 'data' not in zendesk_results:
-            st.info("No Zendesk results found.")
-        else:
-            data = zendesk_results['data']
-            # Handle nested data structure
-            if isinstance(data, dict) and 'data' in data:
-                actual_data = data['data']
-                columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
-                rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
-            else:
-                columns = data.get('columns', []) if isinstance(data, dict) else []
-                rows = data.get('rows', []) if isinstance(data, dict) else []
-            if columns and rows:
-                st.table({"Columns": columns, "Rows": rows})
-
-    with st.expander(f"Jira Issues (Results found)", expanded=False):
-        if not jira_results or 'data' not in jira_results:
-            st.info("No Jira results found.")
-        else:
-            data = jira_results['data']
-            # Handle nested data structure
-            if isinstance(data, dict) and 'data' in data:
-                actual_data = data['data']
-                columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
-                rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
-            else:
-                columns = data.get('columns', []) if isinstance(data, dict) else []
-                rows = data.get('rows', []) if isinstance(data, dict) else []
-            if columns and rows:
-                st.table({"Columns": columns, "Rows": rows})
-
-def generate_sql_for_schema(schema_name: str, query: str) -> str:
-    schema_details = fetch_schema_details(schema_name)
-    if 'error' in schema_details:
-        logger.error(f"generate_sql_for_schema failed for {schema_name}: {schema_details.get('error')}")
-        return ""
-    
-    # Extract schema_details from the response if it's nested
-    if 'schema_details' in schema_details:
-        schema_data = schema_details['schema_details']
-    else:
-        schema_data = schema_details
-    
-    schema_json = json.dumps(schema_data, indent=2)
-    
-    # Detect ticket ID in query (dynamic pattern matching)
-    import re
-    ticket_id_pattern = r'\b\d{4,}\b'  # Match 4+ digit numbers (likely ticket IDs)
-    ticket_ids = re.findall(ticket_id_pattern, query)
-    
-    # Build SQL prompt with ticket-specific instructions if ticket ID detected
-    ticket_instructions = ""
-    if ticket_ids and schema_name == "ZendeskTickets":
-        ticket_instructions = f"\n\nSPECIFIC TICKET QUERY DETECTED: The user is asking about ticket ID(s): {', '.join(ticket_ids)}\n" \
-                             f"Generate a SQL query that searches for these specific ticket IDs using WHERE id IN ({', '.join(ticket_ids)}) or WHERE id = {ticket_ids[0]}\n" \
-                             f"Include all relevant columns: id, subject, description, status, priority, created_at, updated_at, assignee, tags, etc.\n"
-    elif ticket_ids and schema_name == "Jira_F":
-        ticket_instructions = f"\n\nSPECIFIC ISSUE QUERY DETECTED: The user is asking about issue key(s) or ID(s): {', '.join(ticket_ids)}\n" \
-                             f"Generate a SQL query that searches for these specific issues. Check both Key and ID columns.\n" \
-                             f"Include all relevant columns: Key, Summary, Description, Status, Priority, Created, Updated, Assignee, etc.\n"
-    
-    sql_prompt = f"""
-    You are a SQL query generator for Incorta schemas.
-    Schema details: {schema_json}
-    
-    User query: {query}
-    {ticket_instructions}
-    Generate a valid Spark SQL query to answer the query.
-    IMPORTANT REQUIREMENTS:
-    1. Use the EXACT table names and column names from the schema details above
-    2. Use the format: SchemaName.TableName (e.g., ZendeskTickets.ticket or Jira_F.Issues)
-    3. Always include ORDER BY to sort results (e.g., ORDER BY created_at DESC or ORDER BY Created DESC)
-    4. Always include LIMIT clause (e.g., LIMIT 10 or LIMIT 20) to limit results, unless searching for specific ticket IDs
-    5. Use proper Spark SQL syntax
-    6. Return ONLY the SQL query, no explanations, no markdown code blocks, just the raw SQL
-    
-    Example for "latest tickets":
-    SELECT id, subject, created_at FROM ZendeskTickets.ticket ORDER BY created_at DESC LIMIT 10
-    
-    Example for "ticket 12345":
-    SELECT id, subject, description, status, priority, created_at, updated_at FROM ZendeskTickets.ticket WHERE id = 12345
-    
-    Example for "latest issues":
-    SELECT Key, Summary, Created FROM Jira_F.Issues ORDER BY Created DESC LIMIT 10
-    
-    Example for "related bugs to ticket 12345":
-    SELECT Key, Summary, Description, Status, Priority FROM Jira_F.Issues WHERE Summary LIKE '%bug%' OR Description LIKE '%bug%' ORDER BY Created DESC LIMIT 20
-    """
-    
-    # Try to get API manager for retry logic
-    try:
-        from src.api_manager import create_api_manager_from_env
-        api_manager = create_api_manager_from_env()
-        max_retries = len(api_manager.api_keys)
-    except Exception:
-        api_manager = None
-        max_retries = 1
-    
-    sql_response = ""
-    last_error = None
-    
-    # Call Gemini API directly with retry logic (since ask_gemini swallows exceptions)
-    import google.generativeai as genai
-    from src.handler.gemini_handler import DEFAULT_MODEL
-    
-    # Retry with different API keys if quota error occurs
-    for attempt in range(max_retries):
-        try:
-            if api_manager:
-                if attempt > 0:
-                    # Rotate to next API key
-                    api_manager.rotate_key()
-                    logger.info(f"Retrying SQL generation for {schema_name} with different API key (attempt {attempt + 1}/{max_retries})")
-                current_key = api_manager.api_keys[api_manager.current_index]
-            else:
-                # Fallback to single key
-                current_key = os.getenv("GEMINI_API_KEY")
-                if not current_key:
-                    logger.error(f"No API key available for {schema_name} SQL generation")
-                    return ""
-            
-            genai.configure(api_key=current_key)
-            model = genai.GenerativeModel(DEFAULT_MODEL)
-            
-            generation_config = {
-                "temperature": 0.1,
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 1000,
-            }
-            
-            resp = model.generate_content(sql_prompt, generation_config=generation_config)
-            sql_response = resp.text.strip() if hasattr(resp, "text") and resp.text else ""
-            
-            if sql_response and sql_response.strip():
-                if api_manager:
-                    api_manager.mark_success()
-                break  # Success, exit retry loop
-            else:
-                logger.warning(f"Gemini returned empty response for {schema_name} (attempt {attempt + 1}/{max_retries})")
-                
-        except Exception as e:
-            last_error = e
-            error_str = str(e).lower()
-            
-            if api_manager:
-                api_manager.mark_failure(error_type="quota" if "quota" in error_str or "429" in error_str else "generic")
-            
-            # Check if it's a quota/rate limit error
-            if any(keyword in error_str for keyword in ["quota", "429", "rate limit", "resourceexhausted"]):
-                logger.warning(f"Quota error for {schema_name} SQL generation (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    # Wait a bit before retrying with next key
-                    import time
-                    wait_time = 10  # Wait 10 seconds for quota to reset
-                    logger.info(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logger.error(f"All API keys exhausted for {schema_name} SQL generation")
-            else:
-                # Non-quota error, log and break
-                logger.error(f"Error generating SQL for {schema_name}: {e}")
-                break
-    
-    if not sql_response or not sql_response.strip():
-        if last_error:
-            logger.error(f"Failed to generate SQL for {schema_name} after {max_retries} attempts. Last error: {last_error}")
-        else:
-            logger.error(f"Failed to generate SQL for {schema_name}: Gemini returned empty response")
-        return ""
-    
-    # Strip markdown code blocks if present (```sql ... ``` or ``` ... ```)
-    sql_cleaned = sql_response.strip()
-    
-    # Remove markdown code fence if present - handle both ```sql and ``` formats
-    if sql_cleaned.startswith("```"):
-        # Split into lines
-        lines = sql_cleaned.split("\n")
-        # Remove first line if it's a code fence (handles both ``` and ```sql)
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        # Remove last line if it's a closing code fence
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        sql_cleaned = "\n".join(lines).strip()
-    
-    # Also handle case where markdown might be on same line as SQL
-    sql_cleaned = sql_cleaned.replace("```sql", "").replace("```", "").strip()
-    
-    if not sql_cleaned:
-        logger.error(f"SQL cleaning resulted in empty string for {schema_name}")
-        return ""
-    
-    logger.info(f"Generated SQL for {schema_name}: {sql_cleaned}")
-    logger.debug(f"Full SQL query length: {len(sql_cleaned)} characters")
-    return sql_cleaned
+import time
 
 def _is_slack_authenticated_cached() -> bool:
-    """Cache Slack token validity to avoid repeated auth_test calls on every render."""
+    """Check if Slack token is valid with caching to avoid repeated API calls."""
     token = st.session_state.get("slack_token", "")
     if not token:
         st.session_state["slack_token_valid"] = False
@@ -519,788 +62,1050 @@ def _is_slack_authenticated_cached() -> bool:
     st.session_state["slack_token_checked_at"] = now
     return valid
 
-def main() -> None:
-    st.title("Incorta AI Search Assistant Tool")
-    st.caption("Searches Slack, Confluence, Docs, Zendesk, Jira, then asks Gemini to synthesize an answer with sources.")
+# OAuth callback handling
+try:
+    query_params = st.query_params
+except Exception:
+    query_params = {}
 
-    # OAuth callback handling
+if "code" in query_params:
     try:
-        query_params = st.query_params
-    except Exception:
-        query_params = {}
-
-    if "code" in query_params:
-        try:
-            oauth_code = query_params.get("code", "")
-            
-            # Check if we already have a valid token (avoid reprocessing)
-            if st.session_state.get("slack_token") and _is_slack_authenticated_cached():
-                logger.info("Already have valid Slack token, skipping OAuth processing")
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-                # Ensure chat state exists
-                if "chat_messages" not in st.session_state:
-                    st.session_state["chat_messages"] = [
-                        {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-                    ]
-                # Don't rerun - just continue with normal flow
-            else:
-                # Validate state to avoid CSRF; if expected missing (e.g., cloud restart), allow once
-                returned_state = query_params.get("state", "")
-                expected_state = st.session_state.get("slack_oauth_state", "")
-                if expected_state and returned_state != expected_state:
-                    st.error("❌ Authentication failed: invalid_state. Please try again.")
-                    try:
-                        st.query_params.clear()
-                    except Exception:
-                        pass
-                    # Don't stop - allow user to continue
-                    if "chat_messages" not in st.session_state:
-                        st.session_state["chat_messages"] = [
-                            {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-                        ]
-                else:
-                    # Check if this code was already processed
-                    processed_code = st.session_state.get("processed_oauth_code", "")
-                    if processed_code == oauth_code:
-                        logger.info("OAuth code already processed, clearing params and continuing")
-                        try:
-                            st.query_params.clear()
-                        except Exception:
-                            pass
-                        # Ensure chat state exists
-                        if "chat_messages" not in st.session_state:
-                            st.session_state["chat_messages"] = [
-                                {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-                            ]
-                        # Continue without rerun
-                    else:
-                        # Process the OAuth code
-                        logger.info("Processing OAuth code...")
-                        token = exchange_code_for_token(oauth_code)
-                        user_info = get_user_info(token)
-                        st.session_state["slack_token"] = token
-                        st.session_state["slack_user_name"] = user_info.get("name", "User")
-                        st.session_state["slack_user_display_name"] = user_info.get("display_name") or user_info.get("name", "User")
-                        st.session_state["slack_user_id"] = user_info.get("id", "")
-                        st.session_state["processed_oauth_code"] = oauth_code  # Mark code as processed
-                        
-                        # Ensure chat_messages exists after OAuth
-                        if "chat_messages" not in st.session_state:
-                            st.session_state["chat_messages"] = [
-                                {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-                            ]
-                            logger.info("Reinitialized chat_messages after OAuth")
-                        
-                        logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
-                        logger.info(f"Chat messages after OAuth: {len(st.session_state.get('chat_messages', []))} messages")
-                        
-                        # Clear URL params BEFORE showing success message
-                        try:
-                            st.query_params.clear()
-                        except Exception:
-                            pass
-                        
-                        st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
-                        # Rerun to reload page without OAuth params
-                        st.rerun()
-        except Exception as e:
-            msg = str(e)
-            logger.error(f"OAuth error: {msg}", exc_info=True)
-            if "invalid_code" in msg.lower() or "already_used" in msg.lower():
-                # Clear the processed code flag so user can try again
-                if "processed_oauth_code" in st.session_state:
-                    del st.session_state["processed_oauth_code"]
-                st.warning("OAuth code expired or already used. Please click Connect to Slack again.")
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-                if "slack_oauth_state" in st.session_state:
-                    del st.session_state["slack_oauth_state"]
-                # Don't stop - allow user to continue
-            else:
-                st.error(f"❌ Authentication failed: {msg}")
-                logger.error(f"OAuth authentication failed: {msg}", exc_info=True)
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-
-    # Auth gate: require Slack token to search Slack; allow rest to run but show connect if missing
-    if "slack_token" not in st.session_state or not _is_slack_authenticated_cached():
-        with st.sidebar:
-            st.subheader("Slack Authentication")
+        oauth_code = query_params.get("code", "")
+        
+        # Check if we already have a valid token (avoid reprocessing)
+        if st.session_state.get("slack_token") and _is_slack_authenticated_cached():
+            logger.info("Already have valid Slack token, skipping OAuth processing")
             try:
-                oauth_url = get_oauth_url()
-                st.link_button("🔗 Connect to Slack", oauth_url, use_container_width=True)
-                st.caption("You'll be redirected to Slack to authorize, then back here.")
+                st.query_params.clear()
             except Exception:
-                st.info("To enable Slack login, set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and SLACK_REDIRECT_URI in st.secrets or environment.")
+                pass
+        else:
+            # Validate state to avoid CSRF; if expected missing (e.g., cloud restart), allow once
+            returned_state = query_params.get("state", "")
+            expected_state = st.session_state.get("slack_oauth_state", "")
+            if expected_state and returned_state != expected_state:
+                st.error("❌ Authentication failed: invalid_state. Please try again.")
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                st.stop()
 
-    # Add logout in sidebar if logged in
-    with st.sidebar:
-        if st.session_state.get("slack_token"):
-            display_name = st.session_state.get("slack_user_display_name") or st.session_state.get("slack_user_name") or "Signed in"
-            st.markdown(f"**Slack:** {display_name}")
-            if st.button("Logout"):
-                for k in ["slack_token", "slack_user_name", "slack_user_display_name", "slack_user_id"]:
-                    if k in st.session_state:
-                        del st.session_state[k]
-                st.rerun()
-
-    missing = _validate_env()
-    if missing:
-        # Don't require SLACK_USER_TOKEN anymore for OAuth flow
-        if "SLACK_USER_TOKEN" in missing:
-            missing.remove("SLACK_USER_TOKEN")
-        if missing:
-            st.warning("Missing environment variables: " + ", ".join(missing) + ". Set them to enable full functionality.")
-
-    if "search_history" not in st.session_state:
-        st.session_state["search_history"] = []
-
-    with st.sidebar:
-        st.markdown("<h1 style=\"margin-top:0; margin-bottom:0.25rem; font-size:1.6rem;\">Search Options</h1>", unsafe_allow_html=True)
-        
-        st.divider()
-        
-        st.subheader("Filters")
-        channel_hint = st.text_input("Slack channel", value=st.session_state.get("channel_hint", ""), 
-                                     key="channel_hint", placeholder="e.g., general, engineering")
-        space_hint = st.text_input("Confluence space", value=st.session_state.get("space_hint", ""), 
-                                   key="space_hint", placeholder="e.g., PROJ, DOCS")
-
-        st.divider()
-        auto_refresh = True
-        
-    # Initialize chat state - must be done early, before any OAuth redirects
-    if "chat_messages" not in st.session_state:
-        st.session_state["chat_messages"] = [
-            {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-        ]
-        logger.info("Initialized chat_messages in session state")
-    
-    if "context" not in st.session_state:
-        st.session_state["context"] = None
-    if "slack_results" not in st.session_state:
-        st.session_state["slack_results"] = []
-    if "conf_results" not in st.session_state:
-        st.session_state["conf_results"] = []
-    if "filters" not in st.session_state:
-        st.session_state["filters"] = {}
-
-    logger.debug(f"Chat state initialized. Messages count: {len(st.session_state.get('chat_messages', []))}")
-
-    # Display chat messages - handle errors gracefully
-    try:
-        chat_messages = st.session_state.get("chat_messages", [])
-        if not chat_messages:
-            # Reinitialize if empty
-            st.session_state["chat_messages"] = [
-                {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-            ]
-            chat_messages = st.session_state["chat_messages"]
-        
-        for msg in chat_messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg.get("content", ""))
-    except Exception as e:
-        logger.error(f"Error displaying chat messages: {e}", exc_info=True)
-        # Reinitialize chat if corrupted
-        st.session_state["chat_messages"] = [
-            {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-        ]
-        with st.chat_message("assistant"):
-            st.markdown("Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources.")
-
-    user_input = st.chat_input("Type your question")
-
-    if user_input:
-        logger.info(f"User input received: {user_input[:100]}...")
-        try:
-            # Ensure chat_messages exists (might have been lost during OAuth redirect)
-            if "chat_messages" not in st.session_state:
-                st.session_state["chat_messages"] = [
-                    {"role": "assistant", "content": "Hi! Ask me anything. I'll search Slack, Confluence, Docs, Zendesk, Jira, then summarize with sources."}
-                ]
-                logger.info("Reinitialized chat_messages after OAuth redirect")
-            
-            # Add user message to chat immediately
-            st.session_state["chat_messages"].append({"role": "user", "content": user_input})
-            logger.info(f"Added user message. Total messages: {len(st.session_state['chat_messages'])}")
-            
-            with st.chat_message("user"):
-                st.write(user_input)
-        except Exception as e:
-            logger.error(f"Error adding user message to chat: {e}", exc_info=True)
-            st.error(f"Error processing your message: {e}")
-            # Instead of stopping, show error and continue
-            if "chat_messages" not in st.session_state:
-                st.session_state["chat_messages"] = []
-            st.session_state["chat_messages"].append({"role": "assistant", "content": f"Error: {str(e)}"})
-
-        try:
-            with st.chat_message("assistant"):
-                current_filters = {
-                    "channel_hint": (channel_hint or "").strip(),
-                    "space_hint": (space_hint or "").strip(),
-                }
-                stored_filters = st.session_state.get("filters", {})
-                filters_changed = current_filters != stored_filters
-
-            intent_type = ""
-            if "intent_data" in st.session_state:
-                intent_type = st.session_state["intent_data"].get("intent", "")
-            
-            reuse_context = (not auto_refresh) and (not filters_changed) and bool(st.session_state.get("context")) and (intent_type != "latest_message")
-
-            if reuse_context:
-                context = st.session_state.get("context") or ""
-                slack_results = st.session_state.get("slack_results") or []
-                conf_results = st.session_state.get("conf_results") or []
-                docs_results = st.session_state.get("docs_results") or []
-                zendesk_results = st.session_state.get("zendesk_results") or {}
-                jira_results = st.session_state.get("jira_results") or {}
+            # Check if this code was already processed
+            processed_code = st.session_state.get("processed_oauth_code", "")
+            if processed_code == oauth_code:
+                logger.info("OAuth code already processed, clearing params and continuing")
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
             else:
-                with st.spinner("Analyzing query and retrieving sources..."):
-                    cache_filters = {
-                        "channel_hint": (channel_hint or "").strip(),
-                        "space_hint": (space_hint or "").strip(),
-                    }
-                    
-                    intent_data = get_cached_intent_analysis(user_input, cache_filters)
-                    
-                    if not intent_data:
-                        intent_data = analyze_user_intent(user_input)
-                        intent_data = validate_intent(intent_data)
-                        cache_intent_analysis(user_input, cache_filters, intent_data)
-                    
-                    if channel_hint and channel_hint.strip():
-                        intent_data["slack_params"]["channels"] = channel_hint.strip()
-                    if space_hint and space_hint.strip():
-                        intent_data["confluence_params"]["spaces"] = space_hint.strip()
+                # Process the OAuth code
+                logger.info("Processing OAuth code...")
+                token = exchange_code_for_token(oauth_code)
+                user_info_dict = get_user_info(token)
+                st.session_state["slack_token"] = token
+                st.session_state["slack_user_name"] = user_info_dict.get("name", "User")
+                st.session_state["slack_user_display_name"] = user_info_dict.get("display_name") or user_info_dict.get("name", "User")
+                st.session_state["slack_user_id"] = user_info_dict.get("id", "")
+                st.session_state["slack_user_email"] = user_info_dict.get("email", "")
+                st.session_state["slack_user_real_name"] = user_info_dict.get("real_name", "")
+                st.session_state["processed_oauth_code"] = oauth_code  # Mark code as processed
+                
+                logger.info(f"Slack OAuth successful for user: {st.session_state['slack_user_display_name']}")
+                
+                # Clear URL params BEFORE showing success message
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                
+                st.success(f"✅ Connected as {st.session_state['slack_user_display_name']}")
+                # Rerun to reload page without OAuth params
+                st.rerun()
+    except Exception as e:
+        msg = str(e)
+        logger.error(f"OAuth error: {msg}", exc_info=True)
+        if "invalid_code" in msg.lower() or "already_used" in msg.lower():
+            # Clear the processed code flag so user can try again
+            if "processed_oauth_code" in st.session_state:
+                del st.session_state["processed_oauth_code"]
+            st.warning("OAuth code expired or already used. Please click Connect to Slack again.")
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            if "slack_oauth_state" in st.session_state:
+                del st.session_state["slack_oauth_state"]
+        else:
+            st.error(f"❌ Authentication failed: {msg}")
+            logger.error(f"OAuth authentication failed: {msg}", exc_info=True)
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
 
-                    logger.info(f"Intent analysis result: {intent_data}")
-                    
-                    slack_results: List[dict] = []
-                    conf_results: List[dict] = []
-                    docs_results: List[dict] = []
-                    zendesk_results: dict = {}
-                    jira_results: dict = {}
+# Auth gate: require Slack token to proceed
+if "slack_token" not in st.session_state or not _is_slack_authenticated_cached():
+    # Show login UI
+    st.markdown("""
+        <style>
+        .stApp {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        div[data-testid="stVerticalBlock"] > div:has(div.element-container) {
+            background-color: white;
+            padding: 3rem 2rem;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
-                    data_sources = intent_data.get("data_sources", ["slack", "confluence"])
+    st.write("")
+    st.write("")
+    st.write("")
 
-                    # Enforce Slack login: if no valid token, do not search Slack
-                    if ("slack_token" not in st.session_state) or (not _is_slack_authenticated_cached()):
-                        if "slack" in data_sources:
-                            data_sources = [s for s in data_sources if s != "slack"]
-                            st.info("Sign in with Slack to search Slack (private and public channels).")
+    col1, col2, col3 = st.columns([1, 2, 1])
 
-                    with ThreadPoolExecutor(max_workers=5) as pool:
-                        futures = {}
+    with col2:
+        st.markdown("<div style='text-align: center; font-size: 4rem; margin-bottom: 1rem;'>💬</div>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align: center; color: #1a202c; margin-bottom: 0.5rem;'>Internal PM Chat</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #718096; margin-bottom: 2rem;'>Your unified workspace for Slack conversations, Confluence docs, and team knowledge</p>", unsafe_allow_html=True)
 
-                        if "slack" in data_sources:
-                            futures["slack"] = pool.submit(
-                                    search_slack,
-                                user_input,
-                                intent_data,
-                                15,
-                                st.session_state.get("slack_token")
-                            )
-                        
-                        if "confluence" in data_sources:
-                            futures["confluence"] = pool.submit(
-                                search_confluence_optimized,
-                                intent_data,
-                                user_input
-                            )
-                        
-                        # Knowledge base (Docs) search: enable for doc-style queries even if not explicitly requested
-                        def _should_search_docs(query: str) -> bool:
-                                """
-                                Dynamically determine if documentation should be searched.
-                                Analyzes query structure rather than hard-coded terms.
-                                """
-                                if not query:
-                                    return False
-                                
-                                q = query.lower()
-                                query_words = q.split()
-                                
-                                # Check if query explicitly mentions documentation sources
-                                explicit_doc_mentions = ["documentation", "docs", "doc", "guide", "manual", "kb", "knowledge base"]
-                                if any(mention in q for mention in explicit_doc_mentions):
-                                    return True
-                                
-                                # Analyze query structure for procedural/instructional queries
-                                # Longer queries with question words often need documentation
-                                is_procedural_query = (
-                                    len(query_words) > 4 and
-                                    (q.startswith("how ") or "how do" in q or "how can" in q or "how to" in q) or
-                                    any(word in query_words for word in ["steps", "process", "procedure", "method", "way", "configure", "setup"])
-                                )
-                                
-                                # Questions about technical topics often need documentation
-                                is_technical_question = (
-                                    "?" in query and
-                                    any(word in query_words for word in ["what", "how", "why", "where", "when"]) and
-                                    len(query_words) > 3
-                                )
-                                
-                                return is_procedural_query or is_technical_question
+        try:
+            oauth_url = get_oauth_url()
+            st.markdown(f"""
+                <div style='text-align: center; margin: 2rem 0;'>
+                    <a href="{oauth_url}"
+                       style='display: inline-block;
+                              background: #4A154B;
+                              color: white;
+                              padding: 12px 32px;
+                              border-radius: 8px;
+                              text-decoration: none;
+                              font-weight: 600;
+                              font-size: 1rem;
+                              transition: background 0.3s;'>
+                        Sign in with Slack
+                    </a>
+                </div>
+            """, unsafe_allow_html=True)
+        except Exception:
+            st.error("OAuth configuration missing")
 
-                        if any(s in data_sources for s in ["docs", "knowledge_base"]) or _should_search_docs(user_input):
-                                # Dynamically determine doc limit based on query structure
-                                # Longer, more complex queries may need more comprehensive documentation
-                                query_words = user_input.split()
-                                needs_comprehensive = (
-                                    len(query_words) > 6 or  # Longer queries often need more docs
-                                    "?" in user_input  # Questions may need comprehensive answers
-                                )
-                                doc_limit = 10 if needs_comprehensive else 5
-                                futures["docs"] = pool.submit(search_docs_plain, user_input, doc_limit)
-                        
-                        if "zendesk" in data_sources:
-                            try:
-                                logger.info("Fetching Zendesk schema details...")
-                                zendesk_schema = fetch_schema_details("ZendeskTickets")
-                                if 'error' in zendesk_schema:
-                                    logger.error(f"Failed to fetch Zendesk schema: {zendesk_schema.get('error')}")
-                                else:
-                                    logger.info("Generating SQL for Zendesk query...")
-                                    zendesk_sql = generate_sql_for_schema("ZendeskTickets", user_input)
-                                    if zendesk_sql:
-                                        logger.info(f"Zendesk SQL generated (full query): {zendesk_sql}")
-                                        # Validate SQL query has required components
-                                        if "LIMIT" not in zendesk_sql.upper() and "WHERE" not in zendesk_sql.upper():
-                                            logger.warning("Zendesk SQL missing LIMIT clause, adding LIMIT 10")
-                                            zendesk_sql = zendesk_sql.rstrip(";") + " LIMIT 10"
-                                        futures["zendesk"] = pool.submit(
-                                            fetch_table_data,
-                                            zendesk_sql
-                                        )
-                                        
-                                        # If query mentions ticket or asks about related bugs, also search Jira for related issues
-                                        query_lower = user_input.lower()
-                                        if any(term in query_lower for term in ["ticket", "related", "bug", "issue", "related bug"]):
-                                            # Add Jira search for related bugs if not already in data_sources
-                                            if "jira" not in data_sources:
-                                                data_sources.append("jira")
-                                                logger.info("Added Jira to data sources for related bug search")
-                                    else:
-                                        logger.warning("Zendesk SQL generation returned empty string")
-                            except Exception as e:
-                                logger.error(f"Error setting up Zendesk search: {e}", exc_info=True)
-                        
-                        if "jira" in data_sources:
-                            try:
-                                logger.info("Fetching Jira schema details...")
-                                jira_schema = fetch_schema_details("Jira_F")
-                                if 'error' in jira_schema:
-                                    logger.error(f"Failed to fetch Jira schema: {jira_schema.get('error')}")
-                                else:
-                                    logger.info("Generating SQL for Jira query...")
-                                    # If query mentions "related" or "bug" with ticket context, enhance query
-                                    query_lower = user_input.lower()
-                                    enhanced_query = user_input
-                                    if any(term in query_lower for term in ["related", "related bug", "related issue"]):
-                                        # Enhance query to search for bugs/issues related to the ticket
-                                        enhanced_query = f"{user_input} - search for related bugs or issues"
-                                        logger.info("Enhanced Jira query for related bug search")
-                                    
-                                    jira_sql = generate_sql_for_schema("Jira_F", enhanced_query)
-                                    if jira_sql:
-                                        logger.info(f"Jira SQL generated (full query): {jira_sql}")
-                                        # Validate SQL query has required components
-                                        if "LIMIT" not in jira_sql.upper() and "WHERE" not in jira_sql.upper():
-                                            logger.warning("Jira SQL missing LIMIT clause, adding LIMIT 10")
-                                            jira_sql = jira_sql.rstrip(";") + " LIMIT 10"
-                                        futures["jira"] = pool.submit(
-                                            fetch_table_data,
-                                            jira_sql
-                                        )
-                                    else:
-                                        logger.warning("Jira SQL generation returned empty string")
-                            except Exception as e:
-                                logger.error(f"Error setting up Jira search: {e}", exc_info=True)
-                        
-                        for source, future in futures.items():
-                            try:
-                                if source == "slack":
-                                    slack_results = future.result(timeout=75)
-                                elif source == "confluence":
-                                    conf_results = future.result(timeout=60)
-                                elif source == "docs":
-                                    docs_results = future.result(timeout=30)
-                                elif source == "zendesk":
-                                    zendesk_results = future.result(timeout=130)  # Increased timeout to match SQL query timeout (120s) + buffer
-                                    logger.info(f"Zendesk search completed. Results: {type(zendesk_results)}, Keys: {list(zendesk_results.keys()) if isinstance(zendesk_results, dict) else 'N/A'}")
-                                    if isinstance(zendesk_results, dict) and 'error' in zendesk_results:
-                                        logger.error(f"Zendesk search returned error: {zendesk_results.get('error')}")
-                                    elif isinstance(zendesk_results, dict) and 'data' in zendesk_results:
-                                        data = zendesk_results.get('data', {})
-                                        rows = data.get('rows', []) if isinstance(data, dict) else []
-                                        logger.info(f"Zendesk search returned {len(rows)} rows")
-                                elif source == "jira":
-                                    jira_results = future.result(timeout=130)  # Increased timeout to match SQL query timeout (120s) + buffer
-                                    logger.info(f"Jira search completed. Results: {type(jira_results)}, Keys: {list(jira_results.keys()) if isinstance(jira_results, dict) else 'N/A'}")
-                                    if isinstance(jira_results, dict) and 'error' in jira_results:
-                                        logger.error(f"Jira search returned error: {jira_results.get('error')}")
-                                    elif isinstance(jira_results, dict) and 'data' in jira_results:
-                                        data = jira_results.get('data', {})
-                                        rows = data.get('rows', []) if isinstance(data, dict) else []
-                                        logger.info(f"Jira search returned {len(rows)} rows")
-                            except Exception as e:
-                                logger.error(f"{source.title()} search failed: {e}", exc_info=True)
-                                if source == "zendesk":
-                                    zendesk_results = {"error": str(e)}
-                                elif source == "jira":
-                                    jira_results = {"error": str(e)}
-                                if "timeout" in str(e).lower():
-                                    st.warning(f"⏱️ {source.title()} search timed out.")
-                                else:
-                                    st.warning(f"⚠️ {source.title()} search encountered an issue: {str(e)}")
+        st.write("")
+        st.markdown("---")
 
-                    if not slack_results and not conf_results and not docs_results and not zendesk_results and not jira_results:
-                        nores = "No results found in any source. Try adjusting your query or filters."
-                        st.write(nores)
-                        st.session_state["chat_messages"].append({"role": "assistant", "content": nores})
-                        return
-                    
-                    context = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                    st.session_state["context"] = context
-                    st.session_state["slack_results"] = slack_results
-                    st.session_state["conf_results"] = conf_results
-                    st.session_state["docs_results"] = docs_results
-                    st.session_state["zendesk_results"] = zendesk_results
-                    st.session_state["jira_results"] = jira_results
-                    st.session_state["filters"] = current_filters
-                    st.session_state["intent_data"] = intent_data
+        st.markdown("### Why Sign in with Slack?")
 
-            preface = ("Previous conversation context (use for continuity):\n" + "\n".join([f"{prefix} {m['content']}" for m in st.session_state["chat_messages"][-6:] if (prefix := "User:" if m["role"] == "user" else "Assistant:")]) + "\n\n") if st.session_state["chat_messages"][-6:] else ""
+        col_a, col_b = st.columns([1, 9])
+        with col_a:
+            st.write("🔒")
+        with col_b:
+            st.markdown("**Private Channel Access**  \nSearch your private channels and conversations securely")
 
-            with st.spinner("Thinking..."):
-                    # Generate structured answer with citations
+        col_a, col_b = st.columns([1, 9])
+        with col_a:
+            st.write("🎯")
+        with col_b:
+            st.markdown("**Personalized Results**  \nGet search results tailored to your permissions")
+
+        col_a, col_b = st.columns([1, 9])
+        with col_a:
+            st.write("⚡")
+        with col_b:
+            st.markdown("**Unified Search**  \nSearch across Slack, Confluence, and documentation")
+
+        st.write("")
+        st.caption("🔐 Secured by Slack OAuth 2.0")
+
+    st.stop()
+
+# Get authenticated user info for session management
+user_info = {
+    "id": st.session_state.get("slack_user_id", ""),
+    "name": st.session_state.get("slack_user_name", ""),
+    "display_name": st.session_state.get("slack_user_display_name", ""),
+    "real_name": st.session_state.get("slack_user_real_name", ""),
+    "email": st.session_state.get("slack_user_email", ""),
+}
+
+# Initialize session manager
+session_manager = get_session_manager()
+
+# Create or update session
+if "auth_session_id" not in st.session_state:
+    st.session_state.auth_session_id = session_manager.create_session(user_info)
+
+# Update session activity
+session_manager.update_session_activity(st.session_state.auth_session_id)
+
+# Validate session is still active
+if not session_manager.is_session_valid(st.session_state.auth_session_id):
+    st.warning("Your session has expired. Please log in again.")
+    # Clear Slack token
+    if "slack_token" in st.session_state:
+        del st.session_state["slack_token"]
+    st.rerun()
+
+# Constants / Tunables
+LLM_NAME = "Gemini 2.0 Flash Experimental"
+
+# =========================
+# Secrets & Keys
+# =========================
+
+def _get_secret_or_env(name: str, default: str = "") -> str:
+    if name in st.secrets:
+        return st.secrets.get(name, default)
+    return os.getenv(name, default)
+
+GEMINI_API_KEY = _get_secret_or_env("GEMINI_API_KEY")
+
+# =========================
+# CSS (consolidated)
+# =========================
+
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.25rem;
+        font-weight: 800;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 0.5rem;
+    }
+    .subtitle {
+        text-align: center;
+        color: #444;
+        font-size: 1rem;
+        margin-bottom: 1.25rem;
+    }
+    .citation-card {
+        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+        padding: 16px;
+        border-radius: 10px;
+        border-left: 4px solid #1f77b4;
+        margin: 8px 0;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .citation-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+        border-left-color: #0d5aa7;
+    }
+    .citation-title {
+        font-weight: 700;
+        color: #1f77b4;
+        margin-bottom: 8px;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .citation-evidence {
+        font-style: italic;
+        color: #444;
+        margin-bottom: 8px;
+        background: #f0f4f8;
+        padding: 10px;
+        border-radius: 6px;
+        border-left: 3px solid #28a745;
+        font-size: 13px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+    .citation-card a {
+        color: #1f77b4;
+        text-decoration: none;
+        transition: color 0.2s ease;
+    }
+    .citation-card a:hover {
+        color: #0d5aa7;
+        text-decoration: underline;
+    }
+    .stButton>button {
+        background-color: #1f77b4;
+        color: white;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+    }
+    /* Chat message styling */
+    .stChatMessage {
+        padding: 1rem;
+        margin-bottom: 0.5rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# =========================
+# Header with logo
+# =========================
+
+st.markdown('<div class="main-header">Internal PM Chat Assistant</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Ask questions across Confluence, Slack, Docs, Zendesk, and Jira</div>', unsafe_allow_html=True)
+
+# =========================
+# Sidebar
+# =========================
+
+with st.sidebar:
+    # Show authenticated Slack user widget
+    if user_info and user_info.get("id"):
+        st.markdown("### 👤 Signed in as")
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            # User avatar placeholder (Farah's oauth_handler doesn't return image)
+            st.markdown("👤")
+        with col2:
+            display_name = user_info.get("display_name") or user_info.get("real_name") or user_info.get("name") or "User"
+            st.write(f"**{display_name}**")
+            if user_info.get("email"):
+                st.caption(user_info["email"])
+
+        if st.button("🚪 Sign Out", use_container_width=True):
+            # Clear Slack token
+            if "slack_token" in st.session_state:
+                del st.session_state["slack_token"]
+            if "slack_user_name" in st.session_state:
+                del st.session_state["slack_user_name"]
+            if "slack_user_display_name" in st.session_state:
+                del st.session_state["slack_user_display_name"]
+            if "slack_user_id" in st.session_state:
+                del st.session_state["slack_user_id"]
+            if "slack_user_email" in st.session_state:
+                del st.session_state["slack_user_email"]
+            if "slack_user_real_name" in st.session_state:
+                del st.session_state["slack_user_real_name"]
+            st.rerun()
+
+        st.markdown("---")
+
+    st.header("Chat Configuration")
+
+    st.info("""
+    **Agent searches across:**
+    - 📚 Docs (Qdrant)
+    - 💬 Slack Messages
+    - 📖 Confluence Pages
+    - 🎫 Zendesk Tickets (Incorta)
+    - 📋 Jira Issues (Incorta)
+    """)
+
+    st.markdown("---")
+    st.subheader("System Info")
+
+    # Show API key rotation info if available
+    api_key_info = "Single API Key"
+    if st.session_state.get("agent_executor") is not None:
+        executor = st.session_state["agent_executor"]
+        # Check if it's a RetryAgentExecutor with api_manager
+        if hasattr(executor, 'api_manager'):
+            num_keys = len(executor.api_manager.api_keys)
+            current_idx = executor.api_manager.current_index
+            api_key_info = f"{num_keys} API Keys (Current: #{current_idx + 1})"
+
+    st.info(f"""
+    **AI Model:** {LLM_NAME}
+    **Vector DB:** Qdrant
+    **Search:** Multi-source analysis
+    **API Keys:** {api_key_info}
+    """)
+
+    # Cache statistics
+    st.markdown("---")
+    st.subheader("Cache Statistics")
+    cache_stats = get_cache_manager().get_stats()
+    st.metric("Active Cached Items", cache_stats["active_items"])
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Clear Cache", use_container_width=True):
+            get_cache_manager().clear()
+            st.success("Cache cleared!")
+            st.rerun()
+
+    with col2:
+        if st.button("New Chat", use_container_width=True):
+            st.session_state["messages"] = []
+            st.session_state["chat_history"] = []
+            st.success("Chat reset!")
+            st.rerun()
+
+    st.markdown("---")
+    st.subheader("Usage Tips")
+    st.markdown("""
+    - Ask follow-up questions naturally
+    - Reference previous answers with "it", "that", etc.
+    - Use specific keywords for best results
+    - All sources searched automatically
+    """)
+
+    # Show conversation count
+    if "messages" in st.session_state and len(st.session_state["messages"]) > 0:
+        st.markdown("---")
+        st.metric("Messages in Chat", len(st.session_state["messages"]))
+
+# =========================
+# Session state initialization
+# =========================
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
+
+if "chat_history" not in st.session_state:
+    st.session_state["chat_history"] = []
+
+if "agent_executor" not in st.session_state:
+    st.session_state["agent_executor"] = None
+
+# =========================
+# Guardrails
+# =========================
+
+def _ensure_gemini_key_if_needed():
+    if not GEMINI_API_KEY:
+        st.error("GEMINI_API_KEY is not set. Add it to Streamlit secrets or your environment.")
+        st.stop()
+
+# =========================
+# Helper Functions
+# =========================
+
+def _clean_slack_text(text: str) -> str:
+    """Clean Slack message formatting."""
+    import re
+
+    text = re.sub(r'<#[A-Z0-9]+\|([^>]+)>', r'#\1', text)
+    text = re.sub(r'<(https?://[^|>]+)\|([^>]+)>', r'\2 (\1)', text)
+    text = re.sub(r'<(https?://[^>]+)>', r'\1', text)
+    text = re.sub(r'<@[A-Z0-9]+\|([^>]+)>', r'@\1', text)
+    text = re.sub(r'<@([A-Z0-9]+)>', r'@unknown_user', text)
+    text = text.replace('<!channel>', '@channel')
+    text = text.replace('<!here>', '@here')
+    text = text.replace('<!everyone>', '@everyone')
+
+    return text
+
+
+def render_sources(sources):
+    """Render source citations grouped by type in separate expanders."""
+    if not sources:
+        return
+
+    import re
+
+    # Categorize sources by type
+    slack_messages = []
+    confluence_pages = []
+    docs_results = []
+    zendesk_results = []
+    jira_results = []
+    other_sources = []
+
+    # DEBUG: Log each source for categorization analysis
+    logger.info(f"DEBUG render_sources - Processing {len(sources)} sources")
+    for idx, source in enumerate(sources):
+        # Determine source type
+        source_type = source.get("source", "unknown")
+        url = source.get("url", "") or source.get("permalink", "")
+        title = source.get("title", "NO_TITLE")
+        has_space = "space" in source
+
+        logger.info(f"DEBUG render_sources [{idx}] - title: {title}, url: {url}, source_type: {source_type}, has_space: {has_space}")
+
+        # Prioritize source field check first for accurate categorization
+        if "channel" in source or "permalink" in source or source_type == "slack":
+            slack_messages.append(source)
+        elif source_type == "confluence" or ("confluence" in url.lower() and source_type != "knowledge_base"):
+            confluence_pages.append(source)
+            logger.info(f"DEBUG render_sources - CATEGORIZED AS CONFLUENCE: {title}")
+        elif source_type == "zendesk" or ("zendesk" in url.lower() and source_type != "knowledge_base"):
+            zendesk_results.append(source)
+        elif source_type == "jira" or ("jira" in url.lower() and source_type != "knowledge_base"):
+            jira_results.append(source)
+        elif source_type == "knowledge_base" or (url.startswith("http") and source_type not in ["slack", "confluence", "zendesk", "jira"]):
+            docs_results.append(source)
+            logger.info(f"DEBUG render_sources - CATEGORIZED AS KNOWLEDGE_BASE: {title}")
+        else:
+            other_sources.append(source)
+            logger.info(f"DEBUG render_sources - CATEGORIZED AS OTHER: {title}")
+
+    logger.info(f"DEBUG render_sources - Final counts: Slack={len(slack_messages)}, Confluence={len(confluence_pages)}, Docs={len(docs_results)}, Zendesk={len(zendesk_results)}, Jira={len(jira_results)}, Other={len(other_sources)}")
+
+    # Render Slack Messages
+    with st.expander(f"💬 Slack Messages ({len(slack_messages)} found)", expanded=False):
+        if not slack_messages:
+            st.info("No Slack results found.")
+        else:
+            for idx, m in enumerate(slack_messages, 1):
+                channel = m.get('channel', 'Unknown')
+                username = m.get('username', 'Unknown')
+                timestamp = m.get('date', m.get('ts', 'Unknown'))
+                text = _clean_slack_text(m.get('text', '').strip())
+                permalink = m.get('permalink', '')
+                score = m.get('score', 0.0)
+
+                text_escaped = html.escape(text)[:500]
+                if len(text) > 500:
+                    text_escaped += "..."
+
+                st.markdown(f"""
+                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #4A90E2;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="font-weight: 600; color: #1f1f1f;">#{channel}</span>
+                        <span style="color: #666; font-size: 0.9em;">{timestamp}</span>
+                    </div>
+                    <div style="color: #4A90E2; font-size: 0.9em; margin-bottom: 10px;">@{username}</div>
+                    <div style="color: #1f1f1f; line-height: 1.6; margin-bottom: 10px; white-space: pre-wrap;">{text_escaped}</div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <a href="{permalink}" target="_blank" style="color: #4A90E2; text-decoration: none; font-size: 0.9em;">View in Slack</a>
+                        <span style="color: #888; font-size: 0.85em;">Score: {score:.2f}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # Render Confluence Pages
+    with st.expander(f"📖 Confluence Pages ({len(confluence_pages)} found)", expanded=False):
+        if not confluence_pages:
+            st.info("No Confluence results found.")
+        else:
+            for idx, p in enumerate(confluence_pages, 1):
+                title = p.get('title', 'Untitled')
+                space = p.get('space', 'Unknown')
+                last_modified = p.get('last_modified', 'Unknown')
+                excerpt = (p.get('excerpt') or p.get('text', '')).strip()
+                url = p.get('url', '')
+                score = p.get('score', 0.0)
+
+                # Clean excerpt from HTML tags and highlight markers
+                cleaned_excerpt = re.sub(r'@@@hl@@@(.*?)@@@endhl@@@', r'\1', excerpt)
+                cleaned_excerpt = re.sub(r'<[^>]+>', '', cleaned_excerpt)
+                cleaned_excerpt = cleaned_excerpt.replace('&nbsp;', ' ').replace('&amp;', '&')
+                cleaned_excerpt = cleaned_excerpt.replace('&lt;', '<').replace('&gt;', '>')
+                if len(cleaned_excerpt) > 300:
+                    cleaned_excerpt = cleaned_excerpt[:300] + '...'
+
+                st.markdown(f"""
+                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #6B46C1;">
+                    <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{html.escape(title)}</div>
+                    <div style="display: flex; gap: 15px; margin-bottom: 10px; font-size: 0.9em;">
+                        <span style="color: #6B46C1; font-weight: 500;">{html.escape(space)}</span>
+                        <span style="color: #666;">{html.escape(last_modified)}</span>
+                        <span style="color: #888;">Score: {score:.2f}</span>
+                    </div>
+                    <div style="color: #444; line-height: 1.6; margin-bottom: 10px; font-style: italic;">{html.escape(cleaned_excerpt)}</div>
+                    <a href="{url}" target="_blank" style="color: #6B46C1; text-decoration: none; font-size: 0.9em;">Open Page</a>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # Render Knowledge Base Docs
+    with st.expander(f"📚 Knowledge Base Docs ({len(docs_results)} found)", expanded=False):
+        if not docs_results:
+            st.info("No docs results found.")
+        else:
+            for idx, d in enumerate(docs_results, 1):
+                title = d.get('title', 'Untitled')
+                url = d.get('url', '')
+                text = (d.get('text') or '').strip()
+                score = d.get('score', 0.0)
+
+                if len(text) > 300:
+                    text = text[:300] + '...'
+
+                st.markdown(f"""
+                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #28a745;">
+                    <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{html.escape(title)}</div>
+                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score:.2f}</div>
+                    <div style="color: #444; line-height: 1.6; margin-bottom: 10px;">{html.escape(text)}</div>
+                    <a href="{url}" target="_blank" style="color: #28a745; text-decoration: none; font-size: 0.9em;">Open Document</a>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # Render Zendesk Tickets
+    if zendesk_results:
+        with st.expander(f"🎫 Zendesk Tickets ({len(zendesk_results)} found)", expanded=False):
+            for idx, z in enumerate(zendesk_results, 1):
+                title = z.get('title', 'Untitled')
+                url = z.get('url', '')
+                text = (z.get('text') or z.get('excerpt', '')).strip()
+                score = z.get('score', 0.0)
+
+                if len(text) > 300:
+                    text = text[:300] + '...'
+
+                st.markdown(f"""
+                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #dc3545;">
+                    <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{html.escape(title)}</div>
+                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score:.2f}</div>
+                    <div style="color: #444; line-height: 1.6; margin-bottom: 10px;">{html.escape(text)}</div>
+                    <a href="{url}" target="_blank" style="color: #dc3545; text-decoration: none; font-size: 0.9em;">View Ticket</a>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # Render Jira Issues
+    if jira_results:
+        with st.expander(f"📋 Jira Issues ({len(jira_results)} found)", expanded=False):
+            for idx, j in enumerate(jira_results, 1):
+                title = j.get('title', 'Untitled')
+                url = j.get('url', '')
+                text = (j.get('text') or j.get('excerpt', '')).strip()
+                score = j.get('score', 0.0)
+
+                if len(text) > 300:
+                    text = text[:300] + '...'
+
+                st.markdown(f"""
+                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #0052CC;">
+                    <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{html.escape(title)}</div>
+                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score:.2f}</div>
+                    <div style="color: #444; line-height: 1.6; margin-bottom: 10px;">{html.escape(text)}</div>
+                    <a href="{url}" target="_blank" style="color: #0052CC; text-decoration: none; font-size: 0.9em;">View Issue</a>
+                </div>
+                """, unsafe_allow_html=True)
+
+
+def build_conversation_context():
+    """Build conversation context string for agent."""
+    if not st.session_state["chat_history"]:
+        return ""
+
+    # Get last 6 messages (3 exchanges)
+    recent_history = st.session_state["chat_history"][-6:]
+    context_lines = []
+
+    for msg in recent_history:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        content = msg["content"][:200]  # Truncate long messages
+        context_lines.append(f"{role}: {content}")
+
+    return "\n".join(context_lines)
+
+
+def process_query(query: str):
+    """Process a user query and return response with sources."""
+    _ensure_gemini_key_if_needed()
+
+    # Build conversation context
+    conversation_context = build_conversation_context()
+
+    # Enhanced query with context for follow-ups
+    enhanced_query = query
+    if conversation_context:
+        enhanced_query = f"Previous conversation:\n{conversation_context}\n\nCurrent question: {query}"
+
+    # Check cache for agentic search results
+    cache_filters = {
+        "mode": "agentic",
+        "query": query,
+        "context": conversation_context[:100]  # Include short context in cache key
+    }
+    cached_results = get_cached_search_results(query, cache_filters)
+
+    if cached_results:
+        return {
+            "answer": cached_results.get("final_answer"),
+            "sources": cached_results.get("all_sources", []),
+            "tools_used": cached_results.get("tools_used", []),
+            "from_cache": True
+        }
+
+    # Initialize agent executor if not exists
+    if st.session_state["agent_executor"] is None:
+        with st.spinner("🤖 Initializing agent..."):
+            try:
+                st.session_state["agent_executor"] = create_pm_agent(api_key=None)
+            except Exception as e:
+                st.error(f"Failed to initialize agent: {e}")
+                st.stop()
+
+    # Run agent
+    agent_executor = st.session_state["agent_executor"]
+
+    # Collect agent execution details
+    final_answer = None
+    all_sources = []
+    tools_used = set()
+    step_sources = []  # list of lists: sources per observation step
+
+    try:
+        # Collect all chunks
+        all_chunks = []
+        for chunk in agent_executor.stream({"input": enhanced_query}):
+            all_chunks.append(chunk)
+
+            # Collect tool usage
+            if "actions" in chunk:
+                for action in chunk["actions"]:
+                    tools_used.add(action.tool)
+
+            if "steps" in chunk:
+                for step in chunk["steps"]:
+                    # Extract sources from observations
                     try:
-                        # Prepare passages for citation-based answer
-                        passages = []
+                        obs_data = step.observation
+                        collected = []
                         
-                        # Add Slack passages
-                        for msg in (slack_results or [])[:10]:
-                            passages.append({
-                                "source": "slack",
-                                "text": _clean_slack_text(msg.get('text', '')),
-                                "title": f"#{msg.get('channel', 'unknown')} - @{msg.get('username', 'unknown')}",
-                                "url": msg.get('permalink', ''),
-                                "timestamp": msg.get('date', '')
-                            })
+                        # Handle string representation of list (JSON serialized)
+                        if isinstance(obs_data, str):
+                            try:
+                                import json
+                                obs_data = json.loads(obs_data)
+                            except (json.JSONDecodeError, ValueError):
+                                # If not JSON, try eval (less safe but might work for list strings)
+                                try:
+                                    obs_data = eval(obs_data) if obs_data.strip().startswith('[') else obs_data
+                                except:
+                                    pass
                         
-                        # Add Confluence passages
-                        for page in (conf_results or [])[:10]:
-                            passages.append({
-                                "source": "confluence",
-                                "text": page.get('excerpt', ''),
-                                "title": page.get('title', 'Untitled'),
-                                "url": page.get('url', ''),
-                                "space": page.get('space', '')
-                            })
-                        
-                        # Add Knowledge Base passages
-                        for doc in (docs_results or [])[:10]:
-                            # search_docs_plain returns formatted dicts with title, url, text, score, source
-                            # Handle both Qdrant ScoredPoint format and pre-formatted dict format
-                            if hasattr(doc, 'payload'):
-                                # Qdrant ScoredPoint object
-                                payload = doc.payload
-                                text = str(payload.get('text', '') or payload.get('content', '') or '').strip()
-                                title = str(payload.get('title', 'Untitled') or 'Untitled')
-                                url = str(payload.get('url', '') or '')
-                                score = doc.score if hasattr(doc, 'score') else 0.0
-                            elif isinstance(doc, dict):
-                                # Pre-formatted dict from search_docs_plain
-                                text = str(doc.get('text', '') or doc.get('content', '') or '').strip()
-                                title = str(doc.get('title', 'Untitled') or 'Untitled')
-                                url = str(doc.get('url', '') or '')
-                                score = doc.get('score', 0.0)
-                            else:
-                                text = ''
-                                title = 'Untitled'
-                                url = ''
-                                score = 0.0
-                            
-                            # Only add passage if it has text content (minimum 10 chars to avoid empty snippets)
-                            if text and len(text.strip()) >= 10:
-                                passages.append({
-                                    "source": "knowledge_base",
-                                    "text": text,
-                                    "title": title,
-                                    "url": url,
-                                    "score": score
-                                })
-                            else:
-                                logger.debug(f"Skipping Knowledge Base doc '{title}' - no text content (length: {len(text) if text else 0})")
-                        
-                        # Add Zendesk passages
-                        if zendesk_results:
-                            if 'error' in zendesk_results:
-                                logger.warning(f"Zendesk results contain error: {zendesk_results.get('error')}")
-                            elif 'data' in zendesk_results:
-                                data = zendesk_results['data']
-                                # Handle nested data structure: API may return {metadata: {...}, data: {columns: [...], rows: [...]}}
-                                if isinstance(data, dict) and 'data' in data:
-                                    # Nested structure: use data['data']
-                                    actual_data = data['data']
-                                    columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
-                                    rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
-                                else:
-                                    # Flat structure: columns/rows directly in data
-                                    columns = data.get('columns', []) if isinstance(data, dict) else []
-                                    rows = data.get('rows', []) if isinstance(data, dict) else []
-                                logger.info(f"Processing Zendesk passages: {len(rows)} rows, {len(columns)} columns")
-                                logger.debug(f"Zendesk columns: {columns}")
-                                logger.debug(f"Zendesk first row type: {type(rows[0]) if rows else 'N/A'}, preview: {str(rows[0])[:200] if rows else 'N/A'}")
-                                if columns and rows:
-                                    # Format Zendesk tickets as passages
-                                    for idx, row in enumerate(rows[:10]):  # Limit to top 10 tickets
-                                        # Convert row to text representation
-                                        row_text_parts = []
-                                        
-                                        # Handle different row formats
-                                        if isinstance(row, list):
-                                            # Row is a list: [value1, value2, value3]
-                                            for i, col in enumerate(columns):
-                                                if i < len(row):
-                                                    row_text_parts.append(f"{col}: {row[i]}")
-                                        elif isinstance(row, dict):
-                                            # Row is a dict: {col1: value1, col2: value2}
-                                            for col in columns:
-                                                if col in row:
-                                                    row_text_parts.append(f"{col}: {row[col]}")
-                                        else:
-                                            logger.warning(f"Unexpected row format at index {idx}: {type(row)}")
-                                            continue
-                                        
-                                        ticket_text = " | ".join(row_text_parts)
-                                        logger.debug(f"Zendesk ticket {idx} text: {ticket_text[:100]}...")
-                                        
-                                        if ticket_text and len(ticket_text.strip()) >= 10:
-                                            # Try to extract ticket ID and URL if available
-                                            ticket_id = None
-                                            ticket_url = ""
-                                            
-                                            # Extract ticket ID and other important fields based on row format
-                                            ticket_data = {}
-                                            if isinstance(row, list):
-                                                for i, col in enumerate(columns):
-                                                    if i < len(row):
-                                                        col_lower = col.lower()
-                                                        if col_lower in ['id', 'ticket_id', 'ticket id']:
-                                                            ticket_id = str(row[i])
-                                                        ticket_data[col] = row[i]
-                                            elif isinstance(row, dict):
-                                                for col in columns:
-                                                    if col in row:
-                                                        col_lower = col.lower()
-                                                        if col_lower in ['id', 'ticket_id', 'ticket id']:
-                                                            ticket_id = str(row[col])
-                                                        ticket_data[col] = row[col]
-                                            
-                                            if ticket_id:
-                                                ticket_url = f"https://incorta.zendesk.com/agent/tickets/{ticket_id}"
-                                            
-                                            # Build comprehensive ticket text with all available fields for better context
-                                            comprehensive_text = ticket_text
-                                            # Add any missing important fields if available
-                                            if ticket_data:
-                                                important_fields = ['description', 'status', 'priority', 'assignee', 'tags', 'created_at', 'updated_at']
-                                                for field in important_fields:
-                                                    for col, val in ticket_data.items():
-                                                        if col.lower() == field.lower() and val and str(val).strip():
-                                                            if field.lower() not in comprehensive_text.lower():
-                                                                comprehensive_text += f" | {col}: {val}"
-                                            
-                                            passages.append({
-                                                "source": "zendesk",
-                                                "text": comprehensive_text,
-                                                "title": f"Zendesk Ticket {ticket_id or 'N/A'}",
-                                                "url": ticket_url,
-                                                "score": 1.0  # Zendesk results are already filtered
-                                            })
-                                            logger.debug(f"Added Zendesk passage: Ticket {ticket_id}")
-                                else:
-                                    logger.warning(f"Zendesk data missing columns or rows. Columns: {len(columns)}, Rows: {len(rows)}")
-                            else:
-                                logger.warning(f"Zendesk results missing 'data' key. Keys: {list(zendesk_results.keys())}")
-                        else:
-                            logger.debug("No Zendesk results to process")
-                        
-                        # Add Jira passages
-                        if jira_results:
-                            if 'error' in jira_results:
-                                logger.warning(f"Jira results contain error: {jira_results.get('error')}")
-                            elif 'data' in jira_results:
-                                data = jira_results['data']
-                                # Handle nested data structure: API may return {metadata: {...}, data: {columns: [...], rows: [...]}}
-                                if isinstance(data, dict) and 'data' in data:
-                                    # Nested structure: use data['data']
-                                    actual_data = data['data']
-                                    columns = actual_data.get('columns', []) if isinstance(actual_data, dict) else []
-                                    rows = actual_data.get('rows', []) if isinstance(actual_data, dict) else []
-                                else:
-                                    # Flat structure: columns/rows directly in data
-                                    columns = data.get('columns', []) if isinstance(data, dict) else []
-                                    rows = data.get('rows', []) if isinstance(data, dict) else []
-                                logger.info(f"Processing Jira passages: {len(rows)} rows, {len(columns)} columns")
-                                logger.debug(f"Jira columns: {columns}")
-                                logger.debug(f"Jira first row type: {type(rows[0]) if rows else 'N/A'}, preview: {str(rows[0])[:200] if rows else 'N/A'}")
-                                if columns and rows:
-                                    # Format Jira issues as passages
-                                    for idx, row in enumerate(rows[:10]):  # Limit to top 10 issues
-                                        # Convert row to text representation
-                                        row_text_parts = []
-                                        
-                                        # Handle different row formats
-                                        if isinstance(row, list):
-                                            # Row is a list: [value1, value2, value3]
-                                            for i, col in enumerate(columns):
-                                                if i < len(row):
-                                                    row_text_parts.append(f"{col}: {row[i]}")
-                                        elif isinstance(row, dict):
-                                            # Row is a dict: {col1: value1, col2: value2}
-                                            for col in columns:
-                                                if col in row:
-                                                    row_text_parts.append(f"{col}: {row[col]}")
-                                        else:
-                                            logger.warning(f"Unexpected Jira row format at index {idx}: {type(row)}")
-                                            continue
-                                        
-                                        issue_text = " | ".join(row_text_parts)
-                                        logger.debug(f"Jira issue {idx} text: {issue_text[:100]}...")
-                                        
-                                        if issue_text and len(issue_text.strip()) >= 10:
-                                            # Try to extract issue key and URL if available
-                                            issue_key = None
-                                            issue_url = ""
-                                            
-                                            # Extract issue key based on row format
-                                            if isinstance(row, list):
-                                                for i, col in enumerate(columns):
-                                                    if i < len(row) and col.lower() in ['key', 'issue_key', 'issue key', 'jira_key']:
-                                                        issue_key = str(row[i])
-                                                        break
-                                            elif isinstance(row, dict):
-                                                for col in columns:
-                                                    if col.lower() in ['key', 'issue_key', 'issue key', 'jira_key'] and col in row:
-                                                        issue_key = str(row[col])
-                                                        break
-                                            
-                                            if issue_key:
-                                                issue_url = f"https://incorta.atlassian.net/browse/{issue_key}"
-                                            
-                                            passages.append({
-                                                "source": "jira",
-                                                "text": issue_text,
-                                                "title": f"Jira Issue {issue_key or 'N/A'}",
-                                                "url": issue_url,
-                                                "score": 1.0  # Jira results are already filtered
-                                            })
-                                            logger.debug(f"Added Jira passage: Issue {issue_key}")
-                                else:
-                                    logger.warning(f"Jira data missing columns or rows. Columns: {len(columns)}, Rows: {len(rows)}")
-                            else:
-                                logger.warning(f"Jira results missing 'data' key. Keys: {list(jira_results.keys())}")
-                        else:
-                            logger.debug("No Jira results to process")
-                        
-                        # Log passage count for debugging
-                        logger.info(f"Prepared {len(passages)} passages for answer generation")
-                        logger.info(f"Passage sources: {[p.get('source', 'unknown') for p in passages[:5]]}")
-                        
-                        # Use answer_with_citations for structured response with source mentions
-                        if passages:
-                            answer_result = answer_with_citations(user_input, passages)
-                            
-                            if answer_result and answer_result.get("exists"):
-                                summary_text = answer_result.get("answer", "")
-                                logger.info("Generated answer with citations successfully")
-                            else:
-                                # If answer_with_citations failed, try fallback with better prompt
-                                logger.warning(f"answer_with_citations returned exists=false. Attempting fallback...")
-                                context_for_summary = _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                                summary_prompt = (
-                                    "Based on the provided context, write a comprehensive answer to the user's question. "
-                                    "Begin by mentioning the source (e.g., 'According to the documentation...' or 'Based on Slack discussions...'). "
-                                    "For installation or step-by-step queries, provide clear numbered steps with headings.\n\n"
-                                    f"User question: {user_input}\n\nContext:\n{context_for_summary}"
-                                )
-                                summary_text = ask_gemini(summary_prompt, "") or "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
-                        else:
-                            logger.warning("No passages prepared - cannot generate answer")
-                            summary_text = "I couldn't find relevant information to answer your question. Please try rephrasing or adjusting your search terms."
+                        if isinstance(obs_data, list):
+                            # DEBUG: Log observation data
+                            logger.info(f"DEBUG - Observation contains {len(obs_data)} items")
+                            confluence_items = []
+                            knowledge_base_items = []
+                            for item in obs_data:
+                                # Check for source items - include "excerpt" for Confluence results
+                                if isinstance(item, dict) and any(k in item for k in ["url", "title", "text", "excerpt", "permalink"]):
+                                    all_sources.append(item)
+                                    collected.append(item)
+                                    # Track Confluence items specifically - check for source field or space field
+                                    url = item.get("url", "") or item.get("permalink", "")
+                                    source_type = item.get("source", "")
+                                    if "confluence" in url.lower() or item.get("space") or source_type == "confluence":
+                                        confluence_items.append(item.get("title", "NO_TITLE"))
+                                        # Ensure source field is set if missing
+                                        if "source" not in item:
+                                            item["source"] = "confluence"
+                                    # Track knowledge_base items specifically
+                                    elif source_type == "knowledge_base":
+                                        knowledge_base_items.append(item.get("title", "NO_TITLE"))
+                                        # Ensure source field is set if missing
+                                        if "source" not in item:
+                                            item["source"] = "knowledge_base"
+                            if confluence_items:
+                                logger.info(f"DEBUG - Found {len(confluence_items)} Confluence items: {confluence_items}")
+                            if knowledge_base_items:
+                                logger.info(f"DEBUG - Found {len(knowledge_base_items)} Knowledge Base items: {knowledge_base_items}")
+                        if collected:
+                            step_sources.append(collected)
                     except Exception as e:
-                        logger.error(f"Error generating structured answer: {e}", exc_info=True)
-                        # Fallback to simple summary
-                        try:
-                            context_for_summary = context or _format_context(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                            summary_prompt = (
-                                "Write a concise answer answering the user's question directly. "
-                                "Begin by mentioning the source (e.g., 'According to the documentation...' or 'Based on Slack discussions...'). "
-                                "For installation or step-by-step queries, provide clear numbered steps with headings.\n\n"
-                                f"User question: {user_input}\n\nContext:\n{context_for_summary}"
-                            )
-                            summary_text = ask_gemini(summary_prompt, "") or "An error occurred while generating the answer. Please try again."
-                        except Exception:
-                            summary_text = "An error occurred while generating the answer. Please try again."
-
-                    grouped_output = _format_grouped_response(
-                        summary_text,
-                        slack_results,
-                        conf_results,
-                    )
-
-                    st.markdown(grouped_output)
-
-                    # Agent Trace: log to terminal instead of UI
-                    try:
-                        strategies = [r.get('strategy') for r in (slack_results or []) if r.get('strategy')]
-                        strat_counts = {}
-                        for s in strategies:
-                            strat_counts[s] = strat_counts.get(s, 0) + 1
-                        channels = sorted({r.get('channel') for r in (slack_results or []) if r.get('channel')})
-                        conf_top = ", ".join([c.get('title','') for c in (conf_results or [])[:5]])
-                        docs_top = ", ".join([d.get('title','') for d in (docs_results or [])[:5]])
-                        if strat_counts:
-                            logger.info("Agent Trace: Slack strategies used: " + ", ".join([f"{k} x{v}" for k,v in strat_counts.items()]))
-                        if channels:
-                            logger.info("Agent Trace: Slack channels searched: " + ", ".join([f"#{c}" for c in channels]))
-                        logger.info(f"Agent Trace: Confluence results: {len(conf_results or [])}; Top: {conf_top}")
-                        logger.info(f"Agent Trace: Docs results: {len(docs_results or [])}; Top: {docs_top}")
-                    except Exception:
+                        logger.error(f"DEBUG - Error extracting sources: {e}")
                         pass
 
-                    if slack_results or conf_results or docs_results or zendesk_results or jira_results:
-                        _render_sources(slack_results, conf_results, docs_results, zendesk_results, jira_results)
-                    
-                    st.session_state["chat_messages"].append({"role": "assistant", "content": grouped_output})
+            if "output" in chunk:
+                final_answer = chunk["output"]
 
-                    new_entry = {
-                        "question": user_input.strip(),
-                        "channel_hint": (channel_hint or "").strip() or None,
-                        "space_hint": (space_hint or "").strip() or None,
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    }
-                    if not st.session_state["search_history"] or st.session_state["search_history"][0].get("question") != new_entry["question"]:
-                        st.session_state["search_history"].insert(0, new_entry)
-                        if len(st.session_state["search_history"]) > 50:
-                            st.session_state["search_history"] = st.session_state["search_history"][:50]
+        # Determine which sources were actually used in the answer
+        import re
+        
+        def normalize_url(u: str) -> str:
+            try:
+                return (u or "").strip().lower()
+            except:
+                return (u or "").lower()
+
+        def normalize_title(t: str) -> str:
+            try:
+                return (t or "").strip().lower()
+            except:
+                return (t or "").lower()
+
+        # Extract keywords from the answer that might reference sources
+        mentioned_sources = []
+        if isinstance(final_answer, str) and final_answer:
+            answer_lower = final_answer.lower()
+            answer_words = set(answer_lower.split())
+            
+            # Find sources that match by:
+            # 1. URL domain/partial match in answer
+            # 2. Title keywords in answer
+            # 3. Source-specific identifiers (ticket numbers, page titles, etc.)
+            for s in all_sources:
+                url = normalize_url(s.get("url") or s.get("permalink") or "")
+                title = normalize_title(s.get("title") or "")
+                
+                # Check if URL domain or partial URL appears in answer
+                if url:
+                    # Extract domain or key parts
+                    url_parts = url.replace("https://", "").replace("http://", "").split("/")
+                    if url_parts and url_parts[0]:
+                        domain = url_parts[0].split(".")[0]  # e.g., "confluence" from "confluence.incorta.com"
+                        if domain in answer_lower or any(part in answer_lower for part in url_parts[:3] if part):
+                            mentioned_sources.append(s)
+                            continue
+                
+                # Check if title keywords appear in answer
+                if title and len(title) > 3:
+                    title_words = set(title.split())
+                    # If 2+ title words appear in answer, likely referenced
+                    common_words = title_words.intersection(answer_words)
+                    if len(common_words) >= 2:
+                        mentioned_sources.append(s)
+                        continue
+                
+                # Check for Slack channel/username mentions
+                if "channel" in s:
+                    channel = s.get("channel", "").lower()
+                    if channel and f"#{channel}" in answer_lower:
+                        mentioned_sources.append(s)
+                        continue
+                
+                # Check for ticket/issue numbers (Zendesk/Jira)
+                if "ticket" in answer_lower or "issue" in answer_lower:
+                    # Look for patterns like "PROD-123" or ticket IDs
+                    ticket_patterns = re.findall(r'[A-Z]+-\d+|\d{5,}', answer_lower)
+                    if ticket_patterns and url:
+                        # If answer mentions ticket patterns and we have a URL, likely related
+                        mentioned_sources.append(s)
+                        continue
+
+        # Use only sources that were actually mentioned/referenced
+        used_sources = mentioned_sources if mentioned_sources else []
+
+        # If still no sources, try a more lenient approach: use only the LAST observation step
+        # (the one that directly led to the final answer)
+        if not used_sources and step_sources:
+            last_step_sources = step_sources[-1]
+            # Deduplicate
+            seen = set()
+            used_sources = []
+            for s in last_step_sources:
+                key = (s.get("url") or s.get("permalink") or s.get("title") or "")
+                if key and key not in seen:
+                    seen.add(key)
+                    used_sources.append(s)
+            
+        # Final fallback: if agent used tools, only show sources if we have very few
+        # (likely all were used) - otherwise show nothing rather than wrong sources
+        if not used_sources:
+            if len(all_sources) <= 5:
+                # If we have 5 or fewer sources, likely all were used
+                seen = set()
+                used_sources = []
+                for s in all_sources:
+                    key = (s.get("url") or s.get("permalink") or s.get("title") or "")
+                    if key and key not in seen:
+                        seen.add(key)
+                        used_sources.append(s)
+            else:
+                # Too many sources, don't show any rather than showing wrong ones
+                used_sources = []
+
+        # Filter sources by minimum relevance score
+        # Only keep sources with score > 0.3 (if score is available)
+        MIN_RELEVANCE_SCORE = 0.2  # Lowered from 0.3 to avoid filtering good results
+
+        # DEBUG: Log before filtering
+        confluence_before = [s for s in used_sources if "confluence" in (s.get("url", "") or "").lower() or s.get("space") or s.get("source") == "confluence"]
+        logger.info(f"DEBUG - Before filtering: {len(used_sources)} total sources, {len(confluence_before)} Confluence sources")
+        if confluence_before:
+            logger.info(f"DEBUG - Confluence titles before filter: {[s.get('title', 'NO_TITLE') for s in confluence_before]}")
+
+        filtered_sources = []
+        for source in used_sources:
+            score = source.get("score", 1.0)  # Default to 1.0 if no score
+            if isinstance(score, (int, float)) and score >= MIN_RELEVANCE_SCORE:
+                filtered_sources.append(source)
+            elif not isinstance(score, (int, float)):
+                # Keep sources without numeric scores
+                filtered_sources.append(source)
+        used_sources = filtered_sources
+
+        # DEBUG: Log after filtering
+        confluence_after = [s for s in used_sources if "confluence" in (s.get("url", "") or "").lower() or s.get("space") or s.get("source") == "confluence"]
+        logger.info(f"DEBUG - After filtering: {len(used_sources)} total sources, {len(confluence_after)} Confluence sources")
+        if confluence_after:
+            logger.info(f"DEBUG - Confluence titles after filter: {[s.get('title', 'NO_TITLE') for s in confluence_after]}")
+
+        # Check if answer indicates no relevant information found
+        # If so, don't show sources (they're not actually relevant)
+        if final_answer and isinstance(final_answer, str):
+            answer_lower = final_answer.lower()
+            no_results_phrases = [
+                "no relevant information",
+                "couldn't find",
+                "could not find",
+                "no information found",
+                "no results",
+                "unable to find",
+                "don't have any information",
+                "no specific information",
+                "no documentation",
+                "no confluence pages",
+                "no slack messages",
+                "no docs found",
+                "sorry, i couldn't",
+                "sorry, i could not",
+                "i don't have",
+                "i couldn't locate"
+            ]
+            if any(phrase in answer_lower for phrase in no_results_phrases):
+                used_sources = []
+
+        # Cache results
+        try:
+            cache_search_results(query, cache_filters, {
+                "final_answer": final_answer,
+                "all_sources": used_sources,
+                "tools_used": list(tools_used),
+                "mode": "agentic"
+            })
         except Exception as e:
-            error_msg = f"An error occurred while processing your query: {str(e)}"
-            logger.error(f"Error in chat processing: {e}", exc_info=True)
-            st.error(error_msg)
-            st.session_state["chat_messages"].append({"role": "assistant", "content": error_msg})
+            pass  # Don't fail on cache errors
 
-if __name__ == "__main__":
-    main()
+        return {
+            "answer": final_answer,
+            "sources": used_sources,
+            "tools_used": list(tools_used),
+            "from_cache": False
+        }
+
+    except Exception as e:
+        st.error(f"Agent execution failed: {e}")
+        return {
+            "answer": f"Sorry, I encountered an error: {str(e)}",
+            "sources": [],
+            "tools_used": [],
+            "from_cache": False
+        }
+
+
+# =========================
+# Display chat history
+# =========================
+
+for message in st.session_state["messages"]:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+        # Render sources if available
+        if message.get("sources"):
+            render_sources(message["sources"])
+
+        # Show cache indicator
+        if message.get("from_cache"):
+            st.caption("📦 From cache")
+
+# =========================
+# Chat input
+# =========================
+
+if prompt := st.chat_input("Ask a question about your PM tools and processes..."):
+    # Add user message to chat
+    st.session_state["messages"].append({"role": "user", "content": prompt})
+    st.session_state["chat_history"].append({"role": "user", "content": prompt})
+
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Get agent response
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking and searching..."):
+            import time
+            start_time = time.time()
+            response = process_query(prompt)
+            response_time_ms = int((time.time() - start_time) * 1000)
+
+            # Log query for audit trail
+            sources_used = []
+            if response.get("sources"):
+                for source in response["sources"]:
+                    source_type = source.get("source_type", "unknown")
+                    if source_type not in sources_used:
+                        sources_used.append(source_type)
+
+            session_manager.log_query(
+                session_id=st.session_state.auth_session_id,
+                user_id=user_info['id'],
+                email=user_info['email'],
+                query_text=prompt,
+                sources_used=sources_used,
+                response_time_ms=response_time_ms
+            )
+
+        # Display answer
+        st.markdown(response["answer"])
+
+        # Display sources
+        if response["sources"]:
+            # DEBUG: Log what's being passed to render_sources
+            confluence_in_response = [s for s in response["sources"] if "confluence" in (s.get("url", "") or "").lower() or s.get("space") or s.get("source") == "confluence"]
+            logger.info(f"DEBUG - Passing to render_sources: {len(response['sources'])} total, {len(confluence_in_response)} Confluence")
+            if confluence_in_response:
+                logger.info(f"DEBUG - Confluence titles in render_sources: {[s.get('title', 'NO_TITLE') for s in confluence_in_response]}")
+            render_sources(response["sources"])
+
+        # Show cache indicator
+        if response["from_cache"]:
+            st.caption("📦 From cache")
+
+        # Add assistant message to chat
+        st.session_state["messages"].append({
+            "role": "assistant",
+            "content": response["answer"],
+            "sources": response["sources"],
+            "from_cache": response["from_cache"]
+        })
+        st.session_state["chat_history"].append({
+            "role": "assistant",
+            "content": response["answer"]
+        })
+
+# =========================
+# Welcome message
+# =========================
+
+if len(st.session_state["messages"]) == 0:
+    st.markdown("---")
+    st.markdown("### 👋 Welcome! Ask me anything about:")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("""
+        **📚 Documentation**
+        - Product features
+        - Configuration guides
+        - Best practices
+        """)
+
+    with col2:
+        st.markdown("""
+        **🎫 Customer Issues**
+        - Zendesk tickets
+        - Common problems
+        - Support patterns
+        """)
+
+    with col3:
+        st.markdown("""
+        **📋 Development**
+        - Jira tickets
+        - Roadmap items
+        - Feature status
+        """)
+
+    st.markdown("---")
+    st.markdown("**Example questions:**")
+    st.markdown("""
+    - "What is SAML authentication in Incorta?"
+    - "Show me recent Zendesk tickets about performance issues"
+    - "What's the status of the new dashboard feature in Jira?"
+    - "How do I configure materialized views?"
+    """)
+
+# =========================
+# Footer
+# =========================
+
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #666; padding: 1rem;">
+    <small>Internal PM Chat • Conversational Search Assistant • Powered by AI</small>
+</div>
+""", unsafe_allow_html=True)

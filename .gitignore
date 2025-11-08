@@ -3,6 +3,10 @@
 .env.local
 .env.*.local
 
+# OAuth secrets - NEVER COMMIT THESE
+client_secrets.json
+client_secret_*.json
+
 # Python cache
 __pycache__/
 *.py[cod]
@@ -46,4 +50,3 @@ data/*.jsonl
 
 # Logs
 *.log
-.streamlit/secrets.toml

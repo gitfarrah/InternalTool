@@ -14,8 +14,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain_core.prompts import PromptTemplate
 
-from ..handler.confluence_handler import search_confluence
+from ..handler.confluence_handler import search_confluence, search_confluence_optimized as confluence_optimized_handler
 from ..handler.slack_handler import search_slack
+from ..handler.intent_analyzer import analyze_user_intent
 from ..storage.cache_manager import get_cached_search_results, cache_search_results
 
 logger = logging.getLogger(__name__)
@@ -54,16 +55,18 @@ def _get_secret_or_env(name: str, default: str = "") -> str:
 @tool(
     "search_confluence_pages",
     description="""Search for pages in Confluence with optimized query processing.
-    
+
     Args:
         query: Search query
         max_results: Maximum number of results to return
         space_filter: Specific space to search (None for all spaces)
-    
+
     Returns:
-        List of page dictionaries with metadata"""
+        List of page dictionaries with metadata
+        
+    Note: Use this tool when the query mentions "confluence", "wiki", "page", or "internal doc"."""
 )
-def search_confluence_optimized(
+def search_confluence_tool(
     query: str,
     max_results: int = 10,
     space_filter: Optional[str] = None
@@ -71,43 +74,45 @@ def search_confluence_optimized(
     """Optimized Confluence search with query preprocessing."""
     if not query or not query.strip():
         return []
-    
+
     # Use stopwords filtering for better relevance
     query_words = set(query.lower().split())
     stop_words = {
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", 
-        "with", "by", "is", "are", "was", "were", "be", "been", "have", "has", 
-        "had", "do", "does", "did", "will", "would", "could", "should", "may", 
-        "might", "can", "what", "when", "where", "why", "how", "who", "which", 
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of",
+        "with", "by", "is", "are", "was", "were", "be", "been", "have", "has",
+        "had", "do", "does", "did", "will", "would", "could", "should", "may",
+        "might", "can", "what", "when", "where", "why", "how", "who", "which",
         "updates", "about", "on"
     }
     distinct_words = [word for word in query_words if word not in stop_words and len(word) > 2]
-    
+
     # Build search query prioritizing distinct words
     if distinct_words:
         search_query = " ".join(distinct_words)
     else:
         search_query = query
-    
+
     logger.info(f"Optimized Confluence search query: {search_query}, space_filter: {space_filter}")
-    
+
     return search_confluence(search_query, max_results, space_filter)
 
 
 @tool(
     "search_slack_messages",
-    description="""Search for messages in Slack across all channels.
-    
+    description="""Search for messages in Slack across all channels (including private channels the user has access to).
+
     Args:
         query: Search query
         max_results: Maximum number of results to return
         channel_filter: Specific channel to search (None for all channels)
         max_age_hours: Maximum age of messages in hours (default 0 = all history)
-    
+
     Returns:
-        List of message dictionaries with metadata"""
+        List of message dictionaries with metadata
+        
+    Note: This tool searches both public and private channels. Private channels are only included if the user is a member."""
 )
-def search_slack_messages(
+def search_slack_tool(
     query: str,
     max_results: int = 10,
     channel_filter: Optional[str] = None,
@@ -133,6 +138,7 @@ def search_slack_messages(
         keywords = distinct_words
     else:
         keywords = [term for term in query.lower().split() if len(term) > 2]
+
     priority_terms = keywords[:3]  # Top 3 terms as priority
 
     intent_data = {
@@ -149,11 +155,8 @@ def search_slack_messages(
     logger.info(f"Optimized Slack search with keywords: {keywords}, channel_filter: {channel_filter}")
 
     # Use the search_slack function with user_token from session state
-    try:
-        import streamlit as st
-        user_token = st.session_state.get("slack_token") if hasattr(st, 'session_state') else None
-    except Exception:
-        user_token = None
+    import streamlit as st
+    user_token = st.session_state.get("slack_token") if hasattr(st, 'session_state') else None
 
     # DEBUG: Log token status
     token_status = "present" if user_token else "MISSING"
@@ -161,7 +164,7 @@ def search_slack_messages(
     logger.warning(f"🔐 Slack token status: {token_status} (prefix: {token_prefix}...)")
 
     results = search_slack(query, intent_data, max_results, user_token)
-    
+
     # Convert to legacy format for compatibility
     legacy_results = []
     for result in results:
@@ -173,23 +176,42 @@ def search_slack_messages(
             "permalink": result.get("permalink", ""),
             "source": "slack"
         })
-    
+
     return legacy_results
 
 
-def _search_docs_impl(query: str, limit: int = 5) -> List[dict]:
-    """Implementation for searching documents in Qdrant collection."""
+@tool(
+    "search_docs",
+    description="""Search documents in Qdrant collection (Incorta Community, Docs & Support).
+
+    Args:
+        query: Search query
+        limit: Number of results to return
+
+    Returns:
+        List of search results with metadata
+        
+    Note: Use this tool when the query mentions "docs", "documentation", "knowledge base", "kb", "guide", or "tutorial"."""
+)
+def search_docs(query: str, limit: int = 5) -> List[dict]:
+    """Search documents in Qdrant collection with optimized relevance scoring."""
     from qdrant_client import QdrantClient
     from sentence_transformers import SentenceTransformer
-    
+
     if not query or not query.strip():
         return []
-    
+
     try:
         # Support env vars and Streamlit secrets
-        qdrant_url = _get_secret_or_env("QDRANT_URL") or _get_secret_or_env("QDRANT_HOST")
-        qdrant_api_key = _get_secret_or_env("QDRANT_API_KEY", "")
-        
+        qdrant_url = os.getenv("QDRANT_URL") or os.getenv("QDRANT_HOST")
+        qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
+        if not qdrant_url:
+            try:
+                import streamlit as st
+                qdrant_url = st.secrets.get("QDRANT_URL", "") or st.secrets.get("QDRANT_HOST", "")
+                qdrant_api_key = st.secrets.get("QDRANT_API_KEY", qdrant_api_key)
+            except Exception:
+                pass
         if not qdrant_url:
             logger.warning("QDRANT_URL not set; knowledge base search disabled")
             return []
@@ -223,7 +245,7 @@ def _search_docs_impl(query: str, limit: int = 5) -> List[dict]:
             limit=limit,
             with_payload=True
         )
-        
+
         # Format results with lower threshold for better recall
         formatted_results = []
         for r in search_result:
@@ -235,33 +257,13 @@ def _search_docs_impl(query: str, limit: int = 5) -> List[dict]:
                     "score": r.score,
                     "source": "knowledge_base"
                 })
-        
+
         logger.info(f"Returning {len(formatted_results)} knowledge base results")
+
         return formatted_results
     except Exception as e:
         logger.error(f"Failed to search docs: {e}")
         return []
-
-
-@tool(
-    "search_docs",
-    description="""Search documents in Qdrant collection (Incorta Community, Docs & Support).
-    
-    Args:
-        query: Search query
-        limit: Number of results to return
-    
-    Returns:
-        List of search results with metadata"""
-)
-def search_docs(query: str, limit: int = 5) -> List[dict]:
-    """Tool wrapper for agent usage."""
-    return _search_docs_impl(query, limit)
-
-
-def search_docs_plain(query: str, limit: int = 5) -> List[dict]:
-    """Plain callable for programmatic use (no LangChain tool wrapping)."""
-    return _search_docs_impl(query, limit)
 
 
 @tool(
@@ -276,15 +278,13 @@ def search_docs_plain(query: str, limit: int = 5) -> List[dict]:
 )
 def fetch_schema_details(schema_name: str) -> dict:
     """Fetch schema details from the Incorta environment."""
-    env_url = _get_secret_or_env("INCORTA_ENV_URL")
-    tenant = _get_secret_or_env("INCORTA_TENANT")
-    user = _get_secret_or_env("INCORTA_USERNAME")
-    password = _get_secret_or_env("INCORTA_PASSWORD")
+    env_url = os.getenv("INCORTA_ENV_URL")
+    tenant = os.getenv("INCORTA_TENANT")
+    user = os.getenv("INCORTA_USERNAME")  # Fix: use os.getenv instead of undefined variable
+    password = os.getenv("INCORTA_PASSWORD")
     
     if not all([env_url, tenant, user, password]):
-        error_msg = "Missing Incorta credentials. Set INCORTA_ENV_URL, INCORTA_TENANT, INCORTA_USERNAME, INCORTA_PASSWORD in environment variables or Streamlit secrets"
-        logger.error(f"fetch_schema_details failed: {error_msg}")
-        return {"error": error_msg}
+        return {"error": "Missing Incorta credentials. Set INCORTA_ENV_URL, INCORTA_TENANT, INCORTA_USERNAME, INCORTA_PASSWORD"}
     
     try:
         # Login to get session
@@ -358,35 +358,15 @@ def fetch_schema_details(schema_name: str) -> dict:
     Returns:
         Data from the table including columns and rows."""
 )
-def _extract_column_names_from_sql(sql: str) -> list:
-    """Extract column names from a SELECT SQL query."""
-    import re
-    # Match SELECT ... FROM pattern
-    match = re.search(r'SELECT\s+(.+?)\s+FROM', sql, re.IGNORECASE)
-    if match:
-        columns_str = match.group(1).strip()
-        # Split by comma and clean up
-        columns = [col.strip().split()[-1].strip('`"\'') for col in columns_str.split(',')]
-        # Remove 'AS alias' if present
-        columns = [col.split(' AS ')[-1].strip().split()[-1].strip('`"\'') for col in columns]
-        return columns
-    return []
-
-
 def fetch_table_data(spark_sql: str) -> dict:
     """Fetch table data from the Incorta environment."""
-    # Log the SQL query being executed
-    logger.info(f"Executing SQL query: {spark_sql[:200]}..." if len(spark_sql) > 200 else f"Executing SQL query: {spark_sql}")
-    
-    env_url = _get_secret_or_env("INCORTA_ENV_URL")
-    tenant = _get_secret_or_env("INCORTA_TENANT")
-    user = _get_secret_or_env("INCORTA_USERNAME")
-    password = _get_secret_or_env("INCORTA_PASSWORD")
+    env_url = os.getenv("INCORTA_ENV_URL")
+    tenant = os.getenv("INCORTA_TENANT")
+    user = os.getenv("INCORTA_USERNAME")  # Fix: use os.getenv instead of undefined variable
+    password = os.getenv("INCORTA_PASSWORD")
     
     if not all([env_url, tenant, user, password]):
-        error_msg = "Missing Incorta credentials. Set INCORTA_ENV_URL, INCORTA_TENANT, INCORTA_USERNAME, INCORTA_PASSWORD in environment variables or Streamlit secrets"
-        logger.error(f"fetch_table_data failed: {error_msg}")
-        return {"error": error_msg}
+        return {"error": "Missing Incorta credentials"}
     
     try:
         # Login to get session
@@ -439,145 +419,13 @@ def fetch_table_data(spark_sql: str) -> dict:
         }
         
         params = {"sql": spark_sql}
-        logger.info(f"Full SQL query being executed: {spark_sql}")
-        
-        # Use longer timeout for SQL queries (120 seconds) as they may take time to execute
-        # Also set connect timeout separately to fail fast on connection issues
-        response = requests.post(url, headers=headers, json=params, verify=True, timeout=(10, 120))
+        response = requests.post(url, headers=headers, json=params, verify=True, timeout=60)
         
         if response.status_code == 200:
-            result_data = response.json()
-            # Log full response structure for debugging
-            logger.debug(f"Full response structure: {type(result_data)}, Keys: {list(result_data.keys()) if isinstance(result_data, dict) else 'N/A'}")
-            
-            # Log response structure for debugging
-            if isinstance(result_data, dict):
-                # Check if data is nested in a 'data' key (common API pattern)
-                actual_data = result_data.get("data", result_data)
-                logger.debug(f"actual_data type: {type(actual_data)}, Value preview: {str(actual_data)[:200] if actual_data else 'None'}")
-                
-                # Handle different response structures
-                columns = []
-                rows = []
-                
-                if isinstance(actual_data, dict):
-                    # Standard structure: {columns: [...], rows: [...]}
-                    columns = actual_data.get("columns", [])
-                    raw_rows = actual_data.get("rows", [])
-                    
-                    # Process rows - they might be in [{'value': ...}, {'value': ...}] format
-                    rows = []
-                    for row in raw_rows:
-                        if isinstance(row, list):
-                            # Row is a list - could be [{'value': ...}, {'value': ...}] or plain values
-                            processed_row = []
-                            for cell in row:
-                                if isinstance(cell, dict) and 'value' in cell:
-                                    # Extract value from {'value': ...} format
-                                    processed_row.append(cell['value'])
-                                else:
-                                    processed_row.append(cell)
-                            rows.append(processed_row)
-                        else:
-                            rows.append(row)
-                elif isinstance(actual_data, list):
-                    # If data is a list, it might be rows directly
-                    # Try to get columns from metadata or infer from first row
-                    if result_data.get("metadata") and isinstance(result_data["metadata"], dict):
-                        columns = result_data["metadata"].get("columns", [])
-                    
-                    # Process rows - they might be in different formats
-                    processed_rows = []
-                    for row in actual_data:
-                        if isinstance(row, list):
-                            # Row is a list - could be [{'value': ...}, {'value': ...}] or plain values
-                            processed_row = []
-                            for cell in row:
-                                if isinstance(cell, dict) and 'value' in cell:
-                                    # Extract value from {'value': ...} format
-                                    processed_row.append(cell['value'])
-                                else:
-                                    processed_row.append(cell)
-                            processed_rows.append(processed_row)
-                        elif isinstance(row, dict):
-                            # Row is a dict - convert to list of values
-                            processed_rows.append(list(row.values()))
-                        else:
-                            processed_rows.append(row)
-                    
-                    # If no columns in metadata, try to infer from first row or SQL query
-                    if not columns and len(processed_rows) > 0:
-                        if isinstance(processed_rows[0], list):
-                            # Try to extract column names from SQL query
-                            sql_columns = _extract_column_names_from_sql(spark_sql)
-                            if sql_columns and len(sql_columns) == len(processed_rows[0]):
-                                columns = sql_columns
-                            else:
-                                # Fallback to generic names
-                                columns = [f"col_{i}" for i in range(len(processed_rows[0]))]
-                        elif isinstance(processed_rows[0], dict):
-                            columns = list(processed_rows[0].keys())
-                    
-                    rows = processed_rows
-                else:
-                    # If data is not a dict or list, try top-level
-                    columns = result_data.get("columns", [])
-                    rows = result_data.get("rows", [])
-                
-                logger.info(f"SQL query executed successfully. Returned {len(rows)} rows with {len(columns)} columns")
-                if len(rows) == 0:
-                    logger.warning(f"SQL query returned 0 rows. Full query: {spark_sql}")
-                    logger.warning(f"Response structure: {list(result_data.keys())}")
-                    logger.warning(f"Actual data type: {type(actual_data)}")
-                    if isinstance(actual_data, dict):
-                        logger.warning(f"Actual data keys: {list(actual_data.keys())}")
-                        if "columns" in actual_data:
-                            logger.warning(f"Columns in actual_data: {actual_data.get('columns', [])}")
-                        if "rows" in actual_data:
-                            logger.warning(f"Number of rows in actual_data: {len(actual_data.get('rows', []))}")
-                    elif isinstance(actual_data, list):
-                        logger.warning(f"Actual data is a list with {len(actual_data)} items")
-                        if len(actual_data) > 0:
-                            logger.warning(f"First item type: {type(actual_data[0])}, Preview: {str(actual_data[0])[:200]}")
-                    # Also check top-level
-                    if "columns" in result_data:
-                        logger.warning(f"Columns in top-level: {result_data.get('columns', [])}")
-                    if "rows" in result_data:
-                        logger.warning(f"Number of rows in top-level: {len(result_data.get('rows', []))}")
-                    if "metadata" in result_data:
-                        metadata = result_data.get("metadata")
-                        logger.warning(f"Metadata type: {type(metadata)}")
-                        if isinstance(metadata, dict):
-                            logger.warning(f"Metadata keys: {list(metadata.keys())}")
-                            logger.warning(f"Full metadata: {metadata}")
-                        else:
-                            logger.warning(f"Metadata value: {metadata}")
-                
-                # Normalize response to always have {columns: [...], rows: [...]} structure
-                # This ensures consistent format for the rest of the code
-                normalized_data = {
-                    "columns": columns,
-                    "rows": rows
-                }
-                # Preserve metadata if it exists
-                if isinstance(result_data, dict) and "metadata" in result_data:
-                    normalized_data["metadata"] = result_data["metadata"]
-                
-                return {"data": normalized_data}
-            else:
-                # If result_data is not a dict, return as-is
-                return {"data": result_data}
+            return {"data": response.json()}
         else:
-            error_text = response.text
-            logger.error(f"SQL query execution failed with status {response.status_code}: {error_text}")
-            return {"error": f"Failed to fetch data: {response.status_code} - {error_text}"}
+            return {"error": f"Failed to fetch data: {response.status_code} - {response.text}"}
     
-    except requests.exceptions.Timeout as e:
-        logger.error(f"SQL query execution timed out after 120 seconds: {e}")
-        return {"error": f"Query execution timed out. The query may be too complex or the database is slow. Try simplifying the query or checking database performance."}
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error while executing SQL query: {e}")
-        return {"error": f"Network error: {str(e)}"}
     except Exception as e:
         logger.error(f"Failed to fetch table data: {e}")
         return {"error": f"Exception: {str(e)}"}
@@ -698,42 +546,85 @@ def create_pm_agent(api_key: Optional[str] = None):
             api_key = _get_secret_or_env("GEMINI_API_KEY")
 
     if not api_manager and not api_key:
-        raise ValueError("GEMINI_API_KEY must be set in environment or provided as argument")
+        raise ValueError("GEMINI_API_KEY must be set in environment, Streamlit secrets, or provided as argument")
 
-    # Define tools
+    # Define tools (using refactored versions with intent analysis)
     tools = [
-        search_confluence_optimized,
-        search_slack_messages,
+        search_confluence_tool,  # Updated: now uses intent analysis
+        search_slack_tool,        # Updated: now uses intent analysis + channel intelligence
         search_docs,
         fetch_schema_details,
         fetch_table_data
     ]
 
     # Agent prompt template
-    template = """You are an AI Assistant that helps the Product Managers to Search across multiple internal knowledge bases including Confluence, Slack, Docs, Zendesk, and Jira.
+    template = """You are an AI Assistant that helps Product Managers search across multiple internal knowledge bases including Confluence, Slack, Docs, Zendesk, and Jira.
 
 Your available tools are:
 {tools}
 
-Use the `search_confluence_pages` tool to search for relevant Confluence pages.
+IMPORTANT SEARCH GUIDELINES:
 
-Use the `search_slack_messages` tool to search for relevant Slack messages.
+1. Use `search_confluence_pages` to find Confluence documentation:
+   - The tool uses optimized query processing with stopwords filtering for better relevance
+   - Just pass the user's question directly - no need to extract keywords
 
-Use the `search_docs` tool to search for relevant Docs for the PM.
+2. Use `search_slack_messages` to find Slack conversations:
+   - The tool searches across all channels (including private channels the user has access to) with intelligent keyword matching
+   - Returns results with enriched metadata
+   - Just pass the user's question directly
 
-Use the `fetch_schema_details` tool to get the details of Zendesk and Jira
-the input of the `fetch_schema_details` tool should be ONLY ZendeskTickets if the question is about Zendesk
-and Jira_F if the question is about Jira.
+3. Use `search_docs` to search the knowledge base (Incorta Community, Docs & Support):
+   - The tool uses optimized relevance scoring for better results
 
-Use the `fetch_table_data` tool to get the data from the tables in ZendeskTickets and Jira_F schemas.
+4. Use `fetch_schema_details` for Zendesk and Jira database schemas:
+   - Input must be EXACTLY "ZendeskTickets" for Zendesk questions
+   - Input must be EXACTLY "Jira_F" for Jira questions
 
+5. Use `fetch_table_data` to query data from Zendesk/Jira tables
 
-Your Default is to search in all the resources using the relevant tools above.
-but if a PM specifically asks to search in a specific resource, use the relevant tool only.
+CRITICAL SEARCH STRATEGY WITH SOURCE PRIORITIZATION:
 
-if the PM keyword doesn't return any relevant results try to use similar keywords that are related to the PM keyword.
+**Source Priority Detection:**
+- If the user's query mentions "slack", "channel", "message", "conversation", or "#channelname":
+  → PRIORITIZE searching Slack FIRST, then other sources
+- If the user's query mentions "docs", "documentation", "knowledge base", "kb", "guide", "tutorial":
+  → PRIORITIZE searching Docs FIRST, then other sources
+- If the user's query mentions "confluence", "wiki", "page", "internal doc":
+  → PRIORITIZE searching Confluence FIRST, then other sources
+- If the user's query mentions "zendesk", "ticket", "customer issue":
+  → PRIORITIZE Zendesk queries FIRST, then other sources
+- If the user's query mentions "jira", "issue", "bug", "feature request", "roadmap":
+  → PRIORITIZE Jira queries FIRST, then other sources
 
-Provide Recommendations based on relevant tickets from Zendesk and Jira for the PMs to be able to take action on them.
+**Search Execution:**
+- When a source is prioritized, search that source FIRST and wait for results
+- After getting prioritized source results, search other relevant sources
+- If no source is explicitly mentioned, search all sources in parallel
+- Each tool automatically handles relevance scoring - trust the results
+- If one tool returns 0 results, that's fine - combine results from other tools
+- After searching all sources, synthesize a comprehensive answer from ALL results
+
+CRITICAL RESPONSE RULES:
+1. NEVER HALLUCINATE OR INVENT SOURCES
+   - If a tool returns empty results [], DO NOT make up page names or references
+   - If Confluence returns 0 results, say "No Confluence pages found"
+   - If Slack returns 0 results, say "No Slack messages found"
+
+2. ONLY CITE ACTUAL SEARCH RESULTS
+   - Use ONLY the exact titles, channel names, and URLs from the Observation
+   - If you cannot see a source in the Observation, it does not exist
+   - DO NOT reference sources that are not in the actual tool output
+
+3. BE HONEST ABOUT EMPTY RESULTS
+   - If all tools return empty results, say "I couldn't find any information"
+   - If results exist but don't answer the question, say "The results don't address your specific question"
+   - Never pretend to have information you don't actually have
+
+4. RESPONSE FORMAT
+   - Base your answer ONLY on what you see in the Observations
+   - Include recommendations from Zendesk/Jira tickets when they exist in results
+   - Cite specific sources with exact names from the tool output
 
 Use the following format:
 

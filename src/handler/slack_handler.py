@@ -432,6 +432,15 @@ def _identify_thread_candidates(
 def _get_slack_client(user_token: Optional[str] = None) -> WebClient:
     """Get Slack client; requires authenticated user's token (no fallback)."""
     token = user_token or st.session_state.get("slack_token")
+
+    # DEBUG: Log token source and status
+    if user_token:
+        logger.info(f"🔑 Using provided user_token (prefix: {user_token[:10]}...)")
+    elif st.session_state.get("slack_token"):
+        logger.info(f"🔑 Using session_state slack_token (prefix: {st.session_state.get('slack_token')[:10]}...)")
+    else:
+        logger.error("🚫 No Slack token available from either source!")
+
     if not token:
         raise RuntimeError("Missing Slack token. Authenticate via OAuth.")
     cache_key = f"slack_client_{hash(token)}"

@@ -27,6 +27,32 @@ load_dotenv()
 _api_manager = None
 _single_api_key = None
 
+def _get_secret_or_env(name: str, default: str = "") -> str:
+    """
+    Get value from Streamlit secrets first, then fall back to environment variables.
+    
+    Args:
+        name: Name of the secret/environment variable
+        default: Default value if not found
+    
+    Returns:
+        Value from Streamlit secrets or environment variable
+    """
+    # Try Streamlit secrets first (if available and in Streamlit context)
+    try:
+        import streamlit as st
+        # Check if we're in a Streamlit context and if the secret exists
+        if hasattr(st, 'secrets') and name in st.secrets:
+            return st.secrets.get(name, default)
+    except Exception:
+        # Streamlit not available, not in Streamlit context, or any error
+        # Fall through to environment variables
+        pass
+    
+    # Fall back to environment variables (loaded from .env by load_dotenv())
+    # This will work because load_dotenv() is called at module level
+    return os.getenv(name, default)
+
 def _get_api_manager():
     """Get or create API manager instance (supports multiple keys with rotation)."""
     global _api_manager, _single_api_key
@@ -38,9 +64,9 @@ def _get_api_manager():
             logger.info(f"API Manager initialized with {len(_api_manager.api_keys)} key(s)")
         except Exception as e:
             logger.warning(f"Failed to create API manager: {e}, falling back to single key")
-            _single_api_key = os.getenv("GEMINI_API_KEY")
+            _single_api_key = _get_secret_or_env("GEMINI_API_KEY")
             if not _single_api_key:
-                raise RuntimeError("Missing GEMINI_API_KEY in environment variables")
+                raise RuntimeError("Missing GEMINI_API_KEY in environment variables or Streamlit secrets")
             logger.info("Using single API key (no rotation)")
     
     return _api_manager
@@ -158,56 +184,38 @@ For **Troubleshooting & Solutions**:
 
 **Answer Quality Standards:**
 
-1. **Structure & Source Attribution**:
-   - ALWAYS begin your answer by explicitly mentioning the source(s) you're using
-   - Examples:
-     * "According to the documentation..." (for knowledge_base)
-     * "Based on Slack discussions in #channel-name..." (for slack - include channel context)
-     * "According to Confluence pages..." (for confluence)
-     * "Based on multiple sources..." (when synthesizing)
-   - Integrate source citations naturally throughout the answer (e.g., "As mentioned in Slack channel #release-announcements...", "The documentation states...")
-   - For installation/step-by-step guides: Provide clear numbered steps with descriptive headings
-   - For technical explanations: Use structured sections with headings (e.g., "In your scenario:", "Recommendation/Actionable Insight:")
+1. **Structure**:
    - Lead with the direct answer to the question
    - Follow with supporting context and details
-   - End with actionable recommendations when relevant (not hardcoded "Actionable Insight for PMs" sections)
+   - End with actionable next steps if relevant (especially for PM queries)
 
 2. **Length**:
    - Simple queries: 2-4 sentences
    - Complex queries: 4-8 sentences with structured information
-   - Installation/how-to queries: MUST provide detailed step-by-step format with numbered steps and clear headings
-   - Technical queries: Include structured explanations with relevant sections
+   - PM-focused queries: Include recommendations based on data patterns
 
 3. **Tone**:
    - Concise, factual, and professional
    - No filler, disclaimers, or apologetic language
    - When uncertain, state explicitly what's missing or unclear
-   - NO hardcoded sections like "Actionable Insight for PMs" or "Installation Resources Found"
 
 4. **Query-Specific Guidance**:
    - "when/date" queries: Give explicit dates/timeframes if available
-   - "how/why" queries: Provide actionable explanations with numbered steps when appropriate
-   - "installation/setup/step by step" queries: MUST provide detailed step-by-step guide with:
-     * Clear numbered steps (1., 2., 3., etc.)
-     * Descriptive headings for each step or section
-     * Specific instructions from the documentation
-     * Integration of relevant information from multiple sources
+   - "how/why" queries: Provide actionable explanations with steps
    - "status" queries: Include current state and next steps
    - "customer impact" queries: Reference Zendesk patterns if available
    - "roadmap" queries: Cross-reference Jira tickets with Confluence plans
-   - For scenarios/problems: Use structured format with "In your scenario:" and "Recommendation/Actionable Insight:" sections (but make recommendations specific to the query, not generic PM advice)
 
-5. **Citation Integration**:
-   - DO NOT list citations separately (e.g., "Installation Resources Found:")
-   - Integrate citations naturally into the answer text
-   - When mentioning information from Slack, include the channel name (e.g., "According to discussions in #release-announcements...")
-   - When referencing documentation, mention it naturally (e.g., "The documentation states...", "As noted in the installation guide...")
-   - Use bold formatting for key terms and section headers (e.g., "**1. Join Type:**", "**2. Filter Placement:**")
+5. **PM-Specific Value**:
+   - Identify patterns across customer tickets (Zendesk) and internal issues (Jira)
+   - Connect customer pain points to product features and roadmap
+   - Provide data-driven recommendations when relevant
+   - Highlight discrepancies between documentation and actual implementation
 
 **Output Format** (JSON only):
 {
   "exists": boolean,                       // true if relevant info was found
-  "answer": "Synthesized answer: direct response first, then supporting context. For step-by-step queries, include numbered steps with headings. Integrate citations naturally into the text.",
+  "answer": "Synthesized answer: direct response first, then supporting context and actionable insights for PMs",
   "citations": [
       {
         "url": string,
@@ -221,28 +229,16 @@ For **Troubleshooting & Solutions**:
 **Special Instructions:**
 - If passages are incomplete: State what's available and what's missing
 - If no relevant information found: Set exists=false, explain briefly
-- For step-by-step queries: **CRITICAL** - Extract and include ALL actual steps from the documentation. DO NOT summarize. Include:
-  * All numbered steps (1., 2., 3., etc.) from the passages
-  * All commands, file paths, and configuration details
-  * All prerequisites and requirements
-  * Multiple installation methods if mentioned (Docker, bare-metal, etc.)
-  * Use clear headings (e.g., "**1. Prerequisites:**", "**2. Installation Steps:**")
-- DO NOT include hardcoded sections like "Actionable Insight for PMs" or "Installation Resources Found"
-- Integrate citations naturally into the answer text, not as separate lists
-- When mentioning Slack, include channel context (e.g., "According to Slack discussions in #channel-name...")
-- For recommendations: Make them specific to the query context, not generic PM advice
-- Use bold formatting for section headers and key terms in the answer
-- **IMPORTANT**: For installation guides, the answer should contain the actual steps, not just references to where they can be found
+- For PM queries about recommendations: Synthesize insights from multiple sources
+- For cross-source patterns: Explicitly connect the dots (e.g., "Zendesk tickets show X, while Jira backlog addresses Y")
 
 Return strictly valid JSON. No markdown, no commentary, no explanations outside the JSON object.
 """
 
 
-def build_user_payload(query: str, passages: List[dict], max_chars_per_passage: int = 900, query_type: Optional[str] = None) -> str:
+def build_user_payload(query: str, passages: List[dict], max_chars_per_passage: int = 900) -> str:
     """
     Build JSON payload from query and passages.
-    
-    For step-by-step/installation queries, increase passage length to capture full instructions.
     
     Args:
         query: User query string
@@ -252,68 +248,15 @@ def build_user_payload(query: str, passages: List[dict], max_chars_per_passage: 
     Returns:
         JSON string of query and passages
     """
-    # Dynamically adjust passage length based on query structure and content
-    # Analyze query to determine if it requires detailed procedural content
-    query_lower = query.lower()
-    query_words = query_lower.split()
-    
-    # Detect queries that likely need detailed content (based on structure, not hard-coded terms)
-    # Look for patterns that indicate procedural/instructional queries
-    has_procedural_structure = (
-        len(query_words) > 4 and  # Longer queries often need more detail
-        any(word in query_words for word in ["how", "what", "steps", "process", "procedure", "method"]) or
-        query_lower.count("?") > 0  # Questions often need comprehensive answers
-    )
-    
-    # Check if passages contain structured content (numbered steps, lists, etc.)
-    has_structured_content = False
-    for p in passages[:3]:  # Check first few passages
-        text = (p.get("text") or p.get("excerpt") or "").lower()
-        # Look for numbered steps, lists, or structured formatting
-        if any(f"{i}." in text for i in range(1, 10)) or "step" in text or "procedure" in text:
-            has_structured_content = True
-            break
-    
-    # Increase passage length if query structure or content suggests detailed instructions needed
-    if has_procedural_structure or has_structured_content:
-        max_chars_per_passage = 2000  # Longer passages for detailed content
     blocks = []
     for p in passages:
-        snippet = (p.get("text") or p.get("excerpt") or "").strip()
-        if snippet:
-            # For installation guides, try to preserve full content or at least longer snippets
-            # Only truncate if significantly longer than max
-            if len(snippet) > max_chars_per_passage:
-                truncated = snippet[:max_chars_per_passage]
-                # Try to end at a sentence or step boundary for better readability
-                last_period = truncated.rfind('.')
-                last_newline = truncated.rfind('\n')
-                # Find last numbered step (1., 2., etc.)
-                last_number = -1
-                for i in range(1, 20):
-                    num_pos = truncated.rfind(f'{i}.')
-                    if num_pos > last_number:
-                        last_number = num_pos
-                
-                cut_point = max(last_period, last_newline, last_number)
-                if cut_point > max_chars_per_passage * 0.7:  # Only use cut point if it's not too early
-                    snippet = truncated[:cut_point + 1] + "..."
-                else:
-                    snippet = truncated + "..."
-            
-            blocks.append({
-                "title": p.get("title", ""),
-                "url": p.get("url", ""),
-                "snippet": snippet,
-                "source": p.get("source", "unknown")
-            })
-    
-    # Log if we have no valid passages
-    if not blocks:
-        logger.warning(f"No valid passages with text content found. Total passages: {len(passages)}")
-        for i, p in enumerate(passages[:3]):
-            logger.warning(f"Passage {i}: keys={list(p.keys())}, has_text={bool(p.get('text') or p.get('excerpt'))}")
-    
+        snippet = (p.get("text") or p.get("excerpt") or "")[:max_chars_per_passage]
+        blocks.append({
+            "title": p.get("title", ""),
+            "url": p.get("url", ""),
+            "snippet": snippet,
+            "source": p.get("source", "unknown")
+        })
     return json.dumps({"query": query, "passages": blocks}, ensure_ascii=False)
 
 
@@ -367,34 +310,10 @@ def build_enhanced_prompt(
             "If date is uncertain, check multiple sources and note any discrepancies."
         )
 
-    # Dynamically detect queries requiring detailed instructions based on query structure
-    # Analyze query to determine if it asks for procedural/instructional content
-    query_words = query_lower.split()
-    is_procedural_query = (
-        len(query_words) > 4 and  # Longer queries often need detailed answers
-        (query_lower.startswith("how ") or "how do" in query_lower or "how can" in query_lower) or
-        any(word in query_words for word in ["steps", "process", "procedure", "method", "way"])
-    )
-    
-    # Check if passages contain structured procedural content
-    passages_have_steps = False
-    for p in passages[:3]:
-        text = (p.get("text") or p.get("excerpt") or "").lower()
-        if any(f"{i}." in text for i in range(1, 10)) or "step" in text[:200]:
-            passages_have_steps = True
-            break
-    
-    if is_procedural_query or passages_have_steps:
+    if any(term in query_lower for term in ["how to", "configure", "setup", "implement", "install"]):
         additional_instructions += (
-            "\n⚠️ CRITICAL: This query requires detailed procedural content.\n"
-            "You MUST extract and include ALL actual steps, procedures, or instructions from the documentation passages. "
-            "DO NOT just reference the documentation - you MUST include the actual numbered steps, commands, and instructions. "
-            "If the passages contain steps or procedures, you MUST reproduce them in your answer with proper formatting:\n"
-            "- Use numbered lists (1., 2., 3., etc.)\n"
-            "- Include all prerequisites, commands, and configuration details\n"
-            "- Preserve exact technical details (paths, commands, version numbers, file names)\n"
-            "- If multiple methods or approaches exist, include all of them\n"
-            "The user wants the ACTUAL STEPS/PROCEDURES from the passages, not a summary. Extract every relevant step and present them clearly."
+            "\n⚠️ HOW-TO QUERY: Prioritize knowledge_base and Confluence documentation. "
+            "Provide step-by-step guidance if available. Include links to detailed guides."
         )
 
     if any(term in query_lower for term in ["customer", "issue", "problem", "bug", "ticket"]):
@@ -739,41 +658,3 @@ __all__ = [
     "_supported_models",
     "_parse_json_response"
 ]
-
-
-# Backward compatibility wrapper for older app code
-def ask_gemini(prompt: Optional[str] = None, context: str = "", question: Optional[str] = None, model_name: Optional[str] = None) -> str:
-    """
-    Backward-compatible wrapper that generates text from Gemini.
-
-    Accepts either a full prompt (prompt) or a combination of context + question.
-    """
-    try:
-        current_key = _get_current_api_key()
-        genai.configure(api_key=current_key)
-        model_to_use = model_name or DEFAULT_MODEL
-        model = genai.GenerativeModel(model_to_use)
-
-        # Build prompt text
-        if prompt and prompt.strip():
-            prompt_text = prompt
-        else:
-            prompt_text = (context or "").strip()
-            if question and question.strip():
-                if prompt_text:
-                    prompt_text = f"{prompt_text}\n\nQuestion: {question.strip()}"
-                else:
-                    prompt_text = question.strip()
-
-        generation_config = {
-            "temperature": 0.1,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 1000,
-        }
-        resp = model.generate_content(prompt_text, generation_config=generation_config)
-        text = resp.text.strip() if hasattr(resp, "text") and resp.text else ""
-        return text
-    except Exception as e:
-        logger.error(f"ask_gemini failed: {e}")
-        return ""

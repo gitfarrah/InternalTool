@@ -266,7 +266,7 @@ def _alternative_confluence_search(client: Confluence, query: str, max_results: 
                         "url": url,
                         "space": space_name,
                         "last_modified": "Recent",
-                        "match_score": match_score
+                        "match_score": match_score,
                     })
                         
             except Exception as e:
