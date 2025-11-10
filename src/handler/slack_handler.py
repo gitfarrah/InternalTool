@@ -1273,13 +1273,12 @@ def _calculate_final_score(
     normalized_thread = min(thread_score / max_thread_score, 1.0) if thread_score > 0 else 0.0
     
     # Apply the enhanced formula with thread awareness (using normalized scores)
-    # This ensures base_score stays in 0-1 range before boosts
-    base_score = (RANKING_ALPHA * normalized_semantic) + (RANKING_BETA * slack_score) + (RANKING_GAMMA * normalized_thread)
+    base_score = (
+        (RANKING_ALPHA * normalized_semantic)
+        + (RANKING_BETA * slack_score)
+        + (RANKING_GAMMA * normalized_thread)
+    )
     final_score = base_score * adaptive_boost * version_boost
-    
-    # Normalize final score to 0-1 range (cap at 1.0)
-    # This ensures all scores are comparable and in the same 0-1 scale
-    final_score = min(final_score, 1.0)
     
     # Log relevance score breakdown for debugging
     channel_name = result.get("channel", "unknown")
@@ -1327,7 +1326,7 @@ def _rank_results(
         slack = result.get("slack_score", 0.0)
         thread = result.get("thread_relevance_score", 0.0)
         text_preview = result.get("text", "")[:60]
-        logger.info(f"{idx}. Score: {score:.2f} | Channel: #{channel} ({channel_type}) | "
+        logger.info(f"{idx}. Score: {score*100:.2f} | Channel: #{channel} ({channel_type}) | "
                    f"Semantic: {semantic:.2f}, Slack: {slack:.2f}, Thread: {thread:.2f}")
         logger.info(f"   Preview: {text_preview}...")
     logger.info("=" * 80)
@@ -1340,7 +1339,8 @@ def _rank_results(
         result.pop("slack_score", None)
         result.pop("thread_relevance_score", None)
         # Store final relevance score for UI display
-        result["relevance_score"] = round(score, 2)
+        result["relevance_score_raw"] = score
+        result["relevance_score"] = round(score * 100, 2)
         # Keep: is_thread_reply, thread_ts for UI display if needed
         final_results.append(result)
     

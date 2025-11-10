@@ -278,6 +278,15 @@ def search_docs(query: str, limit: int = 5):
             if url:
                 seen_urls.add(url)
 
+    if combined_results:
+        max_score = max(item.get("score", 0.0) for item in combined_results) or 1.0
+        for item in combined_results:
+            raw_score = item.get("score", 0.0)
+            normalized = max(min(raw_score / max_score, 1.0), 0.0)
+            item["score_raw"] = raw_score
+            item["relevance_score"] = round(normalized * 100, 2)
+            item["score"] = normalized
+
     combined_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     return combined_results[:limit]
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from html import unescape
 from typing import List, Optional
@@ -14,9 +15,23 @@ logger = logging.getLogger(__name__)
 
 def _get_confluence_client() -> Confluence:
     
-    url = st.secrets.get("CONFLUENCE_URL")
-    email = st.secrets.get("CONFLUENCE_EMAIL")
-    api_token = st.secrets.get("CONFLUENCE_API_TOKEN")
+    url = None
+    email = None
+    api_token = None
+    
+    used_streamlit_secrets = False
+    try:
+        url = st.secrets.get("CONFLUENCE_URL")
+        email = st.secrets.get("CONFLUENCE_EMAIL")
+        api_token = st.secrets.get("CONFLUENCE_API_TOKEN")
+        used_streamlit_secrets = any([url, email, api_token])
+    except Exception:
+        logger.debug("Streamlit secrets unavailable when configuring Confluence client")
+    
+    # Fallback to environment variables if Streamlit secrets missing
+    url = url or os.getenv("CONFLUENCE_URL")
+    email = email or os.getenv("CONFLUENCE_EMAIL")
+    api_token = api_token or os.getenv("CONFLUENCE_API_TOKEN")
     
     if not (url and email and api_token):
         raise RuntimeError(
@@ -24,7 +39,12 @@ def _get_confluence_client() -> Confluence:
             "CONFLUENCE_EMAIL, and CONFLUENCE_API_TOKEN are set."
         )
     
-    return Confluence(url=url, username=email, password=api_token, cloud=True)
+    client = Confluence(url=url, username=email, password=api_token, cloud=True)
+    logger.info(
+        "Initialized Confluence client using %s configuration",
+        "Streamlit secrets" if used_streamlit_secrets else "environment variables"
+    )
+    return client
 
 
 def _compute_confluence_relevance(query: str, title: str, excerpt: str, last_modified: str) -> float:

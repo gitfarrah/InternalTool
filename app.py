@@ -616,13 +616,18 @@ def render_sources(sources):
                 url = d.get('url', '')
                 text = (d.get('text') or '').strip()
                 steps = d.get('steps') or []
-                score = d.get('score', d.get('relevance_score', 0.0)) or 0.0
+                score = d.get('relevance_score', d.get('score', 0.0)) or 0.0
+                score_raw = d.get('score_raw')
                 source_label = d.get('source', 'Knowledge Base')
                 collection = d.get('collection')
 
                 # Prepare meta badges
+                score_label = f"{score:.2f}"
+                if score_raw is not None:
+                    score_label = f"{score:.2f} (raw {score_raw:.3f})"
+
                 meta_badges = [
-                    f"<span style='background-color: #e6f4ea; color: #1b5e20; padding: 2px 10px; border-radius: 12px; font-size: 0.8em;'>Score {score:.2f}</span>",
+                    f"<span style='background-color: #e6f4ea; color: #1b5e20; padding: 2px 10px; border-radius: 12px; font-size: 0.8em;'>Score {score_label}</span>",
                     f"<span style='background-color: #e8eaf6; color: #283593; padding: 2px 10px; border-radius: 12px; font-size: 0.8em;'>{html.escape(source_label)}</span>",
                 ]
                 if collection:
