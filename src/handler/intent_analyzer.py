@@ -23,32 +23,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-def _get_secret_or_env(name: str, default: str = "") -> str:
-    """
-    Get value from Streamlit secrets first, then fall back to environment variables.
-    
-    Args:
-        name: Name of the secret/environment variable
-        default: Default value if not found
-    
-    Returns:
-        Value from Streamlit secrets or environment variable
-    """
-    # Try Streamlit secrets first (if available and in Streamlit context)
-    try:
-        import streamlit as st
-        # Check if we're in a Streamlit context and if the secret exists
-        if hasattr(st, 'secrets') and name in st.secrets:
-            return st.secrets.get(name, default)
-    except Exception:
-        # Streamlit not available, not in Streamlit context, or any error
-        # Fall through to environment variables
-        pass
-    
-    # Fall back to environment variables (loaded from .env by load_dotenv())
-    return os.getenv(name, default)
-
-
 # Enhanced stopwords including technical and common words
 STOP_WORDS = {
     "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", 
@@ -91,9 +65,9 @@ def configure_genai() -> None:
             import random
             api_key = random.choice(_api_manager.api_keys)
     else:
-        api_key = _get_secret_or_env("GEMINI_API_KEY")
+        api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise RuntimeError("Missing GEMINI_API_KEY in environment variables or Streamlit secrets.")
+            raise RuntimeError("Missing GEMINI_API_KEY environment variable.")
     
     genai.configure(api_key=api_key)
 
@@ -194,104 +168,6 @@ def extract_keywords_smart(text: str, min_length: int = 3, max_keywords: int = 1
     return unique_keywords[:max_keywords]
 
 
-def detect_source_preference(user_query: str) -> Dict[str, int]:
-    """
-    Detect which data sources the user wants to prioritize based on query content.
-    
-    Returns a dictionary mapping source names to priority scores (higher = more priority).
-    Sources: slack, docs, confluence, zendesk, jira
-    """
-    query_lower = user_query.lower()
-    source_scores = {
-        "slack": 0,
-        "docs": 0,
-        "confluence": 0,
-        "zendesk": 0,
-        "jira": 0
-    }
-    
-    # Slack indicators
-    slack_patterns = [
-        r'\bslack\b',
-        r'\bchannel\b',
-        r'\bmessage\b',
-        r'\bconversation\b',
-        r'\bdiscussion\b',
-        r'\bannouncement\b',
-        r'\bteam chat\b',
-        r'#\w+',  # Channel mentions like #engineering
-    ]
-    for pattern in slack_patterns:
-        if re.search(pattern, query_lower):
-            source_scores["slack"] += 2
-    
-    # Docs indicators
-    docs_patterns = [
-        r'\bdocs?\b',
-        r'\bdocumentation\b',
-        r'\bknowledge base\b',
-        r'\bkb\b',
-        r'\bcommunity\b',
-        r'\bsupport article\b',
-        r'\bhelp article\b',
-        r'\bguide\b',
-        r'\btutorial\b',
-    ]
-    for pattern in docs_patterns:
-        if re.search(pattern, query_lower):
-            source_scores["docs"] += 2
-    
-    # Confluence indicators
-    confluence_patterns = [
-        r'\bconfluence\b',
-        r'\bwiki\b',
-        r'\bpage\b',
-        r'\binternal doc\b',
-        r'\bprocess doc\b',
-        r'\bproject doc\b',
-    ]
-    for pattern in confluence_patterns:
-        if re.search(pattern, query_lower):
-            source_scores["confluence"] += 2
-    
-    # Zendesk indicators
-    zendesk_patterns = [
-        r'\bzendesk\b',
-        r'\bticket\b',
-        r'\bcustomer issue\b',
-        r'\bsupport ticket\b',
-        r'\bcustomer problem\b',
-        r'\bcustomer report\b',
-    ]
-    for pattern in zendesk_patterns:
-        if re.search(pattern, query_lower):
-            source_scores["zendesk"] += 2
-    
-    # Jira indicators
-    jira_patterns = [
-        r'\bjira\b',
-        r'\bissue\b',
-        r'\bbug\b',
-        r'\bfeature request\b',
-        r'\bepic\b',
-        r'\bstory\b',
-        r'\btask\b',
-        r'\broadmap\b',
-        r'\bbacklog\b',
-    ]
-    for pattern in jira_patterns:
-        if re.search(pattern, query_lower):
-            source_scores["jira"] += 2
-    
-    # If no explicit source mentioned, return all zeros (no prioritization)
-    max_score = max(source_scores.values())
-    if max_score == 0:
-        return source_scores
-    
-    logger.info(f"Source preference detected: {source_scores}")
-    return source_scores
-
-
 def detect_query_type(
     user_query: str, 
     conversation_history: List[Dict[str, str]],
@@ -376,11 +252,65 @@ def analyze_user_intent(
     # Step 1: Detect query type
     query_type_info = detect_query_type(user_query, conversation_history, last_context)
     
-    # Step 1.5: Detect source preference
-    source_preference = detect_source_preference(user_query)
-    
     # Step 2: Extract smart keywords
     smart_keywords = extract_keywords_smart(user_query)
+    
+    # Step 2.5: Dynamically detect source mentions and prioritize them based on query content
+    query_lower = user_query.lower()
+    detected_sources = []
+    
+    # Dynamic source detection based on query patterns (not hard-coded terms)
+    # Detect ticket-related queries (dynamic pattern matching)
+    ticket_patterns = ["ticket", "tickets", "support", "customer issue", "bug report", "problem report"]
+    if any(pattern in query_lower for pattern in ticket_patterns):
+        detected_sources.append("zendesk")
+        logger.info("Detected ticket-related query - prioritizing Zendesk")
+    
+    # Detect Slack mentions
+    slack_patterns = ["slack", "in slack", "from slack", "slack message", "slack discussion"]
+    if any(pattern in query_lower for pattern in slack_patterns):
+        detected_sources.append("slack")
+        logger.info("Detected Slack mention - prioritizing Slack")
+    
+    # Detect release/version focus and prioritize Slack for historical announcements
+    version_pattern = re.search(r'\b\d{2,4}\.\d+(?:\.\d+)?\b', query_lower)
+    release_terms = ["release", "delivery", "delivered", "version", "announcement", "launch", "ga"]
+    if version_pattern and any(term in query_lower for term in release_terms):
+        if "slack" not in detected_sources:
+            detected_sources.insert(0, "slack")
+        else:
+            # Ensure Slack stays highest priority
+            detected_sources = ["slack"] + [src for src in detected_sources if src != "slack"]
+        logger.info("Detected versioned release query - elevating Slack priority")
+    
+    # Detect Confluence mentions
+    confluence_patterns = ["confluence", "in confluence", "from confluence", "wiki", "documentation page"]
+    if any(pattern in query_lower for pattern in confluence_patterns):
+        detected_sources.append("confluence")
+        logger.info("Detected Confluence mention - prioritizing Confluence")
+    
+    # Detect documentation/knowledge base mentions
+    docs_patterns = ["documentation", "docs", "doc", "knowledge base", "kb", "guide", "manual", "installation guide"]
+    if any(pattern in query_lower for pattern in docs_patterns):
+        detected_sources.append("knowledge_base")
+        logger.info("Detected documentation mention - prioritizing Knowledge Base")
+    
+    # Detect Jira mentions
+    jira_patterns = ["jira", "issue", "issues", "jira ticket", "bug", "feature request"]
+    if any(pattern in query_lower for pattern in jira_patterns):
+        detected_sources.append("jira")
+        logger.info("Detected Jira mention - prioritizing Jira")
+    
+    # Also check for explicit source names
+    if "zendesk" in query_lower:
+        if "zendesk" not in detected_sources:
+            detected_sources.append("zendesk")
+    if "slack" in query_lower and "slack" not in detected_sources:
+        detected_sources.append("slack")
+    if "confluence" in query_lower and "confluence" not in detected_sources:
+        detected_sources.append("confluence")
+    if "jira" in query_lower and "jira" not in detected_sources:
+        detected_sources.append("jira")
     
     # If it's a follow-up, we might not need full intent analysis
     if query_type_info["query_type"] == "follow_up" and last_context:
@@ -388,7 +318,8 @@ def analyze_user_intent(
             "intent": "follow_up",
             "query_type": query_type_info["query_type"],
             "needs_fresh_data": False,
-            "data_sources": [],
+            # Keep knowledge_base available for follow-ups so we can still cite docs
+            "data_sources": ["knowledge_base"],
             "slack_params": {
                 "channels": "all",
                 "time_range": "all",
@@ -413,20 +344,26 @@ def analyze_user_intent(
             for msg in recent_messages
         ]) + "\n\n"
     
+    # Build source priority instructions
+    source_priority_note = ""
+    if detected_sources:
+        source_priority_note = f"\n\n⚠️ IMPORTANT: User explicitly mentioned these sources: {', '.join(detected_sources)}. Prioritize these sources in data_sources and increase their result limits."
+    
     prompt = f"""
 You are an AI assistant that analyzes user queries to extract search parameters for Slack and Confluence.
 
 {context_summary}Current Query: "{user_query}"
 
 Smart Keywords Already Extracted: {smart_keywords}
+{source_priority_note}
 
 Analyze this query and return a JSON response with the following structure:
 
 {{
-    "intent": "latest_message|search_messages|mixed_search|confluence_only|slack_only|follow_up",
+    "intent": "latest_message|search_messages|mixed_search|confluence_only|slack_only|follow_up|docs_only",
     "query_type": "{query_type_info['query_type']}",
     "needs_fresh_data": {str(query_type_info['needs_fresh_data']).lower()},
-    "data_sources": ["slack", "confluence"],
+    "data_sources": ["slack", "confluence", "knowledge_base"],
     "slack_params": {{
         "channels": "all|specific_channel_name|list_of_channels",
         "time_range": "all",
@@ -461,7 +398,15 @@ Intent Types:
 - "mixed_search": Information could be in both Slack and Confluence
 - "confluence_only": Documentation/knowledge base content
 - "slack_only": Discussions/announcements
+- "docs_only": User explicitly wants documentation/knowledge base only
 - "follow_up": Clarification on previous response
+
+Source Detection:
+- If user mentions "slack", "in slack", "from slack" → prioritize slack_only or set slack limit higher
+- If user mentions "confluence" → prioritize confluence_only or set confluence limit higher  
+- If user mentions "documentation", "docs", "doc", "guide", "manual", "installation" → prioritize docs_only or knowledge_base with higher limit
+- If user mentions "zendesk" or "ticket" → include zendesk in data_sources
+- If user mentions "jira" or "issue" → include jira in data_sources
 
 Search Strategies:
 - "exact_match": For technical terms, IDs, versions (use priority_terms)
@@ -541,12 +486,40 @@ Return ONLY the JSON response.
             intent_data["slack_params"]["keywords"] = list(set(slack_kw + smart_keywords))
             intent_data["confluence_params"]["keywords"] = list(set(conf_kw + smart_keywords))
         
+        # Apply source priority if user explicitly mentioned sources
+        if detected_sources:
+            # Prioritize detected sources in data_sources list (move to front for highest priority)
+            current_sources = intent_data.get("data_sources", ["slack", "confluence", "knowledge_base"])
+            # Move detected sources to front - first detected source gets highest priority
+            prioritized_sources = detected_sources + [s for s in current_sources if s not in detected_sources]
+            intent_data["data_sources"] = prioritized_sources
+            
+            # Increase limits for prioritized sources (highest priority source gets most results)
+            for idx, source in enumerate(detected_sources):
+                priority_multiplier = 2.0 if idx == 0 else 1.5  # First source gets 2x, others get 1.5x
+                if source == "slack":
+                    base_limit = intent_data.get("slack_params", {}).get("limit", 15)
+                    intent_data["slack_params"]["limit"] = int(base_limit * priority_multiplier)
+                elif source == "confluence":
+                    base_limit = intent_data.get("confluence_params", {}).get("limit", 10)
+                    intent_data["confluence_params"]["limit"] = int(base_limit * priority_multiplier)
+                elif source == "knowledge_base":
+                    # Knowledge base limit is handled in search_docs_plain
+                    intent_data["data_sources"] = list(set(intent_data["data_sources"] + ["knowledge_base", "docs"]))
+                elif source == "zendesk":
+                    # Ensure zendesk is in data_sources
+                    if "zendesk" not in intent_data["data_sources"]:
+                        intent_data["data_sources"].append("zendesk")
+                elif source == "jira":
+                    # Ensure jira is in data_sources
+                    if "jira" not in intent_data["data_sources"]:
+                        intent_data["data_sources"].append("jira")
+            
+            logger.info(f"Applied dynamic source priority: {detected_sources} - Updated data_sources: {intent_data['data_sources']}")
+        
         # Add query type info
         intent_data["query_type"] = query_type_info["query_type"]
         intent_data["needs_fresh_data"] = query_type_info["needs_fresh_data"]
-        
-        # Add source preference
-        intent_data["source_preference"] = source_preference
         
         logger.info(f"Intent analysis result: {intent_data}")
         return intent_data
@@ -567,7 +540,6 @@ def _get_default_intent() -> Dict[str, Any]:
         "query_type": "new_search",
         "needs_fresh_data": True,
         "data_sources": ["slack", "confluence"],
-        "source_preference": {"slack": 0, "docs": 0, "confluence": 0, "zendesk": 0, "jira": 0},
         "slack_params": {
             "channels": "all",
             "time_range": "all",  # No time restrictions - search all available history
@@ -603,7 +575,8 @@ def validate_intent(intent_data: Dict[str, Any]) -> Dict[str, Any]:
     intent_data.setdefault("intent", "mixed_search")
     intent_data.setdefault("query_type", "new_search")
     intent_data.setdefault("needs_fresh_data", True)
-    intent_data.setdefault("data_sources", ["slack", "confluence"])
+    # Include knowledge_base by default so docs are considered unless explicitly excluded
+    intent_data.setdefault("data_sources", ["slack", "confluence", "knowledge_base"])
     intent_data.setdefault("search_strategy", "fuzzy_match")
     
     # Validate slack_params
@@ -621,6 +594,37 @@ def validate_intent(intent_data: Dict[str, Any]) -> Dict[str, Any]:
     conf_params.setdefault("limit", 15)  # Increased default limit for comprehensive search
     conf_params.setdefault("keywords", [])
     conf_params.setdefault("priority_terms", [])
+
+    # Heuristics: for doc-style queries, ensure knowledge_base is included
+    # Analyze query structure dynamically rather than using hard-coded terms
+    ql = json.dumps(intent_data).lower()
+    
+    # Extract query text from intent data for analysis
+    query_text = ""
+    if "reasoning" in intent_data:
+        query_text += intent_data["reasoning"] + " "
+    if "slack_params" in intent_data and "keywords" in intent_data["slack_params"]:
+        query_text += " ".join(intent_data["slack_params"]["keywords"]) + " "
+    if "confluence_params" in intent_data and "keywords" in intent_data["confluence_params"]:
+        query_text += " ".join(intent_data["confluence_params"]["keywords"])
+    
+    query_words = query_text.lower().split() if query_text else []
+    
+    # Check for explicit documentation mentions
+    explicit_doc_mentions = ["documentation", "docs", "doc", "guide", "manual", "kb", "knowledge base"]
+    has_explicit_mention = any(mention in ql for mention in explicit_doc_mentions)
+    
+    # Analyze query structure for procedural/instructional content
+    is_procedural = (
+        len(query_words) > 4 and
+        (ql.startswith("how ") or "how do" in ql or "how can" in ql or "how to" in ql) or
+        any(word in query_words for word in ["steps", "process", "procedure", "method", "way", "configure", "setup"])
+    )
+    
+    if has_explicit_mention or is_procedural:
+        ds = set(intent_data.get("data_sources", []))
+        ds.add("knowledge_base")
+        intent_data["data_sources"] = list(ds)
     
     return intent_data
 
@@ -641,7 +645,6 @@ __all__ = [
     "analyze_intent",  # Backward compatibility
     "extract_keywords_smart",
     "detect_query_type",
-    "detect_source_preference",
     "validate_intent",
     "configure_genai"
 ]

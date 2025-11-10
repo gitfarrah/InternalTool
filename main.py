@@ -1,11 +1,13 @@
-from typing import List, Optional
+from typing import List, Optional, Set
 import logging
+import os
+import re
+from html import unescape
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from src.handler.confluence_handler import search_confluence_pages
 from src.handler.slack_handler import search_slack_simplified
 from dotenv import load_dotenv
-import os
 import requests
 
 from langchain_core.tools import tool
@@ -129,10 +131,16 @@ def search_slack_messages(
             "text": result.get("text", ""),
             "username": result.get("username", "Unknown"),
             "channel": result.get("channel", "unknown"),
+            "channel_id": result.get("channel_id"),
             "ts": result.get("ts", ""),
+            "date": result.get("date", ""),
             "permalink": result.get("permalink", ""),
-                        "source": "slack"
-                    })
+            "relevance_score": result.get("relevance_score"),
+            "score": result.get("relevance_score", result.get("score", 0.0)),
+            "is_private": result.get("is_private", False),
+            "strategy": result.get("strategy"),
+            "source": "slack"
+        })
             
     return legacy_results
 
@@ -166,18 +174,112 @@ def get_qdrant_client():
         List of search results with payloads"""
 )
 def search_docs(query: str, limit: int = 5):
-    """Search documents in Qdrant collection."""
+    """Search documents in Qdrant collections with step extraction."""
     client = get_qdrant_client()
     embedding_model = load_embedding_model()
     query_vector = embedding_model.encode([query])[0]
 
-    search_result = client.search(
-        collection_name="docs",
-        query_vector=("content_vector", query_vector),
-        limit=limit,
-        with_payload=True
-    )
-    return search_result
+    def _discover_doc_collections(qdrant_client: QdrantClient) -> List[str]:
+        try:
+            collections_response = qdrant_client.get_collections()
+            candidate_names = []
+            for coll in collections_response.collections:
+                name = getattr(coll, "name", "")
+                lowered = (name or "").lower()
+                if any(keyword in lowered for keyword in ("doc", "kb", "knowledge", "guide", "community", "support")):
+                    candidate_names.append(name)
+            if candidate_names:
+                return candidate_names
+        except Exception as discovery_error:
+            logger.warning(f"Failed to auto-discover doc collections: {discovery_error}")
+        return ["docs"]
+
+    def _strip_markup(raw_text: str) -> str:
+        if not raw_text:
+            return ""
+        text = re.sub(r'@@@hl@@@(.*?)@@@endhl@@@', r'\1', raw_text, flags=re.DOTALL)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = unescape(text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    def _extract_steps(text: str, max_steps: int = 6) -> List[str]:
+        if not text:
+            return []
+        steps: List[str] = []
+        for line in text.splitlines():
+            clean_line = line.strip()
+            if not clean_line:
+                continue
+            match = re.match(r'^(?:step\s*\d+|(?:\d+[\).\]])|[-*•])\s*(.+)', clean_line, flags=re.IGNORECASE)
+            if match:
+                candidate = match.group(1).strip()
+                if candidate:
+                    steps.append(candidate)
+            elif re.match(r'^\d+\s+-\s+(.+)', clean_line):
+                candidate = re.sub(r'^\d+\s+-\s+', '', clean_line).strip()
+                if candidate:
+                    steps.append(candidate)
+            if len(steps) >= max_steps:
+                break
+        if steps:
+            return steps[:max_steps]
+
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        for sentence in sentences:
+            candidate = sentence.strip()
+            if len(candidate) < 25:
+                continue
+            steps.append(candidate)
+            if len(steps) >= max_steps:
+                break
+        return steps[:max_steps]
+
+    collections_to_search = _discover_doc_collections(client)
+    per_collection_limit = max(limit, 5)
+    combined_results: List[dict] = []
+    seen_urls: Set[str] = set()
+
+    for collection_name in collections_to_search:
+        try:
+            hits = client.search(
+                collection_name=collection_name,
+                query_vector=("content_vector", query_vector),
+                limit=per_collection_limit,
+                with_payload=True
+            )
+        except Exception as search_error:
+            logger.warning(f"Docs search failed for collection '{collection_name}': {search_error}")
+            continue
+
+        for hit in hits:
+            score = getattr(hit, "score", 0.0)
+            if score < 0.2:
+                continue
+            payload = getattr(hit, "payload", {}) or {}
+            url = payload.get("url", "")
+            if url and url in seen_urls:
+                continue
+
+            raw_text = payload.get("text", "") or ""
+            cleaned_text = _strip_markup(raw_text)
+            steps = _extract_steps(cleaned_text)
+
+            formatted = {
+                "title": payload.get("title", "") or "",
+                "url": url,
+                "text": cleaned_text[:1000],
+                "steps": steps,
+                "score": score,
+                "collection": collection_name,
+                "source": payload.get("source", "knowledge_base"),
+            }
+            combined_results.append(formatted)
+            if url:
+                seen_urls.add(url)
+
+    combined_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+    return combined_results[:limit]
 
 env_url = os.getenv("INCORTA_ENV_URL")
 tenant = os.getenv("INCORTA_TENANT")

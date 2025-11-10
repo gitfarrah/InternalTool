@@ -544,11 +544,14 @@ def render_sources(sources):
         else:
             for idx, m in enumerate(slack_messages, 1):
                 channel = m.get('channel', 'Unknown')
+                channel_label = f"#{channel}"
+                if m.get("is_private"):
+                    channel_label += " (private)"
                 username = m.get('username', 'Unknown')
-                timestamp = m.get('date', m.get('ts', 'Unknown'))
+                timestamp = m.get('date') or m.get('ts', 'Unknown')
                 text = _clean_slack_text(m.get('text', '').strip())
                 permalink = m.get('permalink', '')
-                score = m.get('score', 0.0)
+                score = m.get('score', m.get('relevance_score', 0.0)) or 0.0
 
                 text_escaped = html.escape(text)[:500]
                 if len(text) > 500:
@@ -557,7 +560,7 @@ def render_sources(sources):
                 st.markdown(f"""
                 <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #4A90E2;">
                     <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-                        <span style="font-weight: 600; color: #1f1f1f;">#{channel}</span>
+                        <span style="font-weight: 600; color: #1f1f1f;">{channel_label}</span>
                         <span style="color: #666; font-size: 0.9em;">{timestamp}</span>
                     </div>
                     <div style="color: #4A90E2; font-size: 0.9em; margin-bottom: 10px;">@{username}</div>
@@ -612,16 +615,33 @@ def render_sources(sources):
                 title = d.get('title', 'Untitled')
                 url = d.get('url', '')
                 text = (d.get('text') or '').strip()
-                score = d.get('score', 0.0)
+                steps = d.get('steps') or []
+                score = d.get('score', d.get('relevance_score', 0.0)) or 0.0
+                source_label = d.get('source', 'Knowledge Base')
+                collection = d.get('collection')
 
                 if len(text) > 300:
                     text = text[:300] + '...'
 
+                collection_chip = ""
+                if collection:
+                    collection_chip = f"<span>{html.escape(collection)}</span>"
+
+                if steps:
+                    steps_items = ''.join(f"<li>{html.escape(step)}</li>" for step in steps[:6])
+                    body_html = f"<ul style='margin: 0 0 10px 18px; color: #444; line-height: 1.6;'>{steps_items}</ul>"
+                else:
+                    body_html = f"<div style='color: #444; line-height: 1.6; margin-bottom: 10px;'>{html.escape(text)}</div>"
+
                 st.markdown(f"""
                 <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #28a745;">
                     <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{html.escape(title)}</div>
-                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score:.2f}</div>
-                    <div style="color: #444; line-height: 1.6; margin-bottom: 10px;">{html.escape(text)}</div>
+                    <div style="display: flex; gap: 15px; margin-bottom: 8px; font-size: 0.9em; color: #666;">
+                        <span>Score: {score:.2f}</span>
+                        <span>{html.escape(source_label)}</span>
+                        {collection_chip}
+                    </div>
+                    {body_html}
                     <a href="{url}" target="_blank" style="color: #28a745; text-decoration: none; font-size: 0.9em;">Open Document</a>
                 </div>
                 """, unsafe_allow_html=True)

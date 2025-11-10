@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from html import unescape
 from typing import List, Optional
 
 from atlassian import Confluence
@@ -26,7 +28,6 @@ def _get_confluence_client() -> Confluence:
 
 
 def _compute_confluence_relevance(query: str, title: str, excerpt: str, last_modified: str) -> float:
-    import re
     score = 0.0
     q = (query or "").lower()
     t = (title or "").lower()
@@ -57,6 +58,17 @@ def _compute_confluence_relevance(query: str, title: str, excerpt: str, last_mod
     except Exception:
         pass
     return score
+
+
+def _clean_excerpt_text(excerpt: str) -> str:
+    """Remove highlight markers and HTML artifacts from Confluence excerpts."""
+    if not excerpt:
+        return ""
+    text = re.sub(r'@@@hl@@@(.*?)@@@endhl@@@', r'\1', excerpt, flags=re.DOTALL)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = unescape(text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 def search_confluence(query: str, max_results: int = 10, space_key: Optional[str] = None) -> List[dict]:
@@ -149,7 +161,8 @@ def search_confluence(query: str, max_results: int = 10, space_key: Optional[str
                                 space_name = space_match.group(1)
                         
                         # Extract excerpt
-                        excerpt = item.get("excerpt", "") or content.get("excerpt", "")
+                        excerpt_raw = item.get("excerpt", "") or content.get("excerpt", "")
+                        excerpt = _clean_excerpt_text(excerpt_raw)
                         
                         # Extract last modified (simplified)
                         version = content.get("version", {})
@@ -161,6 +174,7 @@ def search_confluence(query: str, max_results: int = 10, space_key: Optional[str
                         results.append({
                             "title": title,
                             "excerpt": excerpt[:300] if excerpt else "",
+                            "excerpt_raw": excerpt_raw,
                             "url": url,
                             "space": space_name,
                             "last_modified": last_modified,
@@ -258,11 +272,13 @@ def _alternative_confluence_search(client: Confluence, query: str, max_results: 
                     url = f"{base_url}{webui}" if base_url and webui else ""
                     
                     # Get excerpt from body
-                    excerpt = body[:300] if body else ""
+                    excerpt_raw = body[:300] if body else ""
+                    excerpt = _clean_excerpt_text(excerpt_raw)
                     
                     results.append({
                         "title": title,
                         "excerpt": excerpt,
+                        "excerpt_raw": excerpt_raw,
                         "url": url,
                         "space": space_name,
                         "last_modified": "Recent",
