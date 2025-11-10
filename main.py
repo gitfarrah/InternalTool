@@ -284,7 +284,7 @@ def search_docs(query: str, limit: int = 5):
             raw_score = item.get("score", 0.0)
             normalized = max(min(raw_score / max_score, 1.0), 0.0)
             item["score_raw"] = raw_score
-            item["relevance_score"] = round(normalized * 100, 2)
+            item["relevance_score"] = round(normalized, 4)
             item["score"] = normalized
 
     combined_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)

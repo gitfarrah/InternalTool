@@ -357,7 +357,7 @@ def search_docs(query: str, limit: int = 5) -> List[dict]:
                 raw_score = item.get("score", 0.0)
                 normalized = max(min(raw_score / max_score, 1.0), 0.0)
                 item["score_raw"] = raw_score
-                item["relevance_score"] = round(normalized * 100, 2)
+                item["relevance_score"] = round(normalized, 4)
                 item["score"] = normalized
 
         # Sort combined results by normalized score descending and truncate to requested limit

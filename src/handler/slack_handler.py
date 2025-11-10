@@ -1279,6 +1279,7 @@ def _calculate_final_score(
         + (RANKING_GAMMA * normalized_thread)
     )
     final_score = base_score * adaptive_boost * version_boost
+    final_score = max(min(final_score, 1.0), 0.0)
     
     # Log relevance score breakdown for debugging
     channel_name = result.get("channel", "unknown")
@@ -1339,8 +1340,7 @@ def _rank_results(
         result.pop("slack_score", None)
         result.pop("thread_relevance_score", None)
         # Store final relevance score for UI display
-        result["relevance_score_raw"] = score
-        result["relevance_score"] = round(score * 100, 2)
+        result["relevance_score"] = round(score, 4)
         # Keep: is_thread_reply, thread_ts for UI display if needed
         final_results.append(result)
     

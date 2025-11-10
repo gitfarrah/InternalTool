@@ -622,9 +622,9 @@ def render_sources(sources):
                 collection = d.get('collection')
 
                 # Prepare meta badges
-                score_label = f"{score:.2f}"
+                score_label = f"{score:.3f}"
                 if score_raw is not None:
-                    score_label = f"{score:.2f} (raw {score_raw:.3f})"
+                    score_label = f"{score:.3f} (raw {score_raw:.3f})"
 
                 meta_badges = [
                     f"<span style='background-color: #e6f4ea; color: #1b5e20; padding: 2px 10px; border-radius: 12px; font-size: 0.8em;'>Score {score_label}</span>",
