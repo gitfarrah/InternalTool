@@ -620,27 +620,56 @@ def render_sources(sources):
                 source_label = d.get('source', 'Knowledge Base')
                 collection = d.get('collection')
 
-                if len(text) > 300:
-                    text = text[:300] + '...'
-
-                collection_chip = ""
+                # Prepare meta badges
+                meta_badges = [
+                    f"<span style='background-color: #e6f4ea; color: #1b5e20; padding: 2px 10px; border-radius: 12px; font-size: 0.8em;'>Score {score:.2f}</span>",
+                    f"<span style='background-color: #e8eaf6; color: #283593; padding: 2px 10px; border-radius: 12px; font-size: 0.8em;'>{html.escape(source_label)}</span>",
+                ]
                 if collection:
-                    collection_chip = f"<span>{html.escape(collection)}</span>"
+                    meta_badges.append(
+                        f"<span style='background-color: #f1f3f4; color: #3c4043; padding: 2px 10px; border-radius: 12px; font-size: 0.8em;'>{html.escape(collection)}</span>"
+                    )
+                meta_html = " ".join(meta_badges)
 
+                # Build body content (steps preferred, otherwise concise summary)
                 if steps:
-                    steps_items = ''.join(f"<li>{html.escape(step)}</li>" for step in steps[:6])
-                    body_html = f"<ul style='margin: 0 0 10px 18px; color: #444; line-height: 1.6;'>{steps_items}</ul>"
+                    steps_items = ''.join(f"<li>{html.escape(step.strip())}</li>" for step in steps[:6] if step.strip())
+                    body_html = (
+                        "<div style='color: #444; line-height: 1.6; margin-bottom: 10px;'>"
+                        "<strong>Steps:</strong>"
+                        f"<ol style='margin: 6px 0 0 20px;'>{steps_items}</ol>"
+                        "</div>"
+                    )
                 else:
-                    body_html = f"<div style='color: #444; line-height: 1.6; margin-bottom: 10px;'>{html.escape(text)}</div>"
+                    sentences = re.split(r'(?<=[.!?])\s+', text)
+                    summary_items = []
+                    for sentence in sentences:
+                        clean_sentence = sentence.strip()
+                        if len(clean_sentence) < 12:
+                            continue
+                        summary_items.append(html.escape(clean_sentence))
+                        if len(summary_items) >= 3:
+                            break
+                    if summary_items:
+                        summary_list = ''.join(f"<li>{item}</li>" for item in summary_items)
+                        body_html = (
+                            "<div style='color: #444; line-height: 1.6; margin-bottom: 10px;'>"
+                            "<strong>Summary:</strong>"
+                            f"<ul style='margin: 6px 0 0 18px;'>{summary_list}</ul>"
+                            "</div>"
+                        )
+                    else:
+                        truncated = html.escape(text[:300] + ("..." if len(text) > 300 else ""))
+                        body_html = (
+                            "<div style='color: #444; line-height: 1.6; margin-bottom: 10px;'>"
+                            f"{truncated}"
+                            "</div>"
+                        )
 
                 st.markdown(f"""
                 <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #28a745;">
                     <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{html.escape(title)}</div>
-                    <div style="display: flex; gap: 15px; margin-bottom: 8px; font-size: 0.9em; color: #666;">
-                        <span>Score: {score:.2f}</span>
-                        <span>{html.escape(source_label)}</span>
-                        {collection_chip}
-                    </div>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; font-size: 0.9em; color: #666;">{meta_html}</div>
                     {body_html}
                     <a href="{url}" target="_blank" style="color: #28a745; text-decoration: none; font-size: 0.9em;">Open Document</a>
                 </div>
