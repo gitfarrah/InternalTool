@@ -65,10 +65,11 @@ def configure_genai() -> None:
             import random
             api_key = random.choice(_api_manager.api_keys)
     else:
-        api_key = os.getenv("GEMINI_API_KEY")
+        # Try numbered keys first, then fall back to GEMINI_API_KEY
+        api_key = os.getenv("GEMINI_API_KEY_1") or os.getenv("GEMINI_API_KEY_2") or os.getenv("GEMINI_API_KEY_3") or os.getenv("GEMINI_API_KEY_4") or os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise RuntimeError("Missing GEMINI_API_KEY environment variable.")
-    
+            raise RuntimeError("Missing GEMINI_API_KEY or GEMINI_API_KEY_1/2/3/4 environment variable.")
+
     genai.configure(api_key=api_key)
 
 
@@ -349,79 +350,52 @@ def analyze_user_intent(
     if detected_sources:
         source_priority_note = f"\n\n⚠️ IMPORTANT: User explicitly mentioned these sources: {', '.join(detected_sources)}. Prioritize these sources in data_sources and increase their result limits."
     
-    prompt = f"""
-You are an AI assistant that analyzes user queries to extract search parameters for Slack and Confluence.
+    prompt = f"""Extract search params from query.
+{context_summary}Query: "{user_query}"
+Keywords: {smart_keywords}{source_priority_note}
 
-{context_summary}Current Query: "{user_query}"
-
-Smart Keywords Already Extracted: {smart_keywords}
-{source_priority_note}
-
-Analyze this query and return a JSON response with the following structure:
-
+JSON output:
 {{
     "intent": "latest_message|search_messages|mixed_search|confluence_only|slack_only|follow_up|docs_only",
     "query_type": "{query_type_info['query_type']}",
     "needs_fresh_data": {str(query_type_info['needs_fresh_data']).lower()},
-    "data_sources": ["slack", "confluence", "knowledge_base"],
-    "slack_params": {{
-        "channels": "all|specific_channel_name|list_of_channels",
-        "time_range": "all",
-        "keywords": ["use smart keywords + add important domain terms"],
-        "sort": "relevance|timestamp",
-        "limit": number,
-        "priority_terms": ["critical search terms that MUST match"]
-    }},
-    "confluence_params": {{
-        "keywords": ["use smart keywords + add documentation-relevant terms"],
-        "spaces": "all|specific_space|list_of_spaces",
-        "content_types": ["page", "blogpost"],
-        "limit": number,
-        "priority_terms": ["critical search terms that MUST match"]
-    }},
+    "data_sources": ["slack","confluence","knowledge_base"],
+    "slack_params": {{"channels": "all|name", "time_range": "all", "keywords": [], "sort": "relevance|timestamp", "limit": num, "priority_terms": []}},
+    "confluence_params": {{"keywords": [], "spaces": "all|name", "content_types": ["page","blogpost"], "limit": num, "priority_terms": []}},
     "search_strategy": "exact_match|fuzzy_match|semantic_search",
-    "reasoning": "Brief explanation of the analysis"
+    "reasoning": "brief"
 }}
 
-IMPORTANT INSTRUCTIONS:
-1. Use the smart keywords already extracted, but ADD domain-specific terms if needed
-2. For technical queries, prioritize exact matches for version numbers, IDs, and technical terms
-3. For conceptual queries, allow fuzzy matching
-4. Set priority_terms for MUST-MATCH keywords (version numbers, product names, specific topics)
-5. If query mentions specific channels/spaces, extract them
-6. Search ALL available history - never miss the right answer because it's old.
-7. For follow-up questions, keep limit low (5-10) since context already exists
+RULES:
+1. Use keywords + add domain-specific terms
+2. Technical query → exact_match + priority_terms (versions/IDs/terms)
+3. Conceptual → fuzzy_match
+4. Follow-up → limit=5-10
+5. Extract channels/spaces if mentioned
+6. Search all history
 
-Intent Types:
-- "latest_message": User wants the most recent message(s)
-- "search_messages": User wants to search for specific content
-- "mixed_search": Information could be in both Slack and Confluence
-- "confluence_only": Documentation/knowledge base content
-- "slack_only": Discussions/announcements
-- "docs_only": User explicitly wants documentation/knowledge base only
-- "follow_up": Clarification on previous response
+INTENT:
+latest_message: recent msg(s)
+search_messages: specific content
+mixed_search: both sources
+confluence_only: docs
+slack_only: discussions
+docs_only: documentation/kb
+follow_up: clarification
 
-Source Detection:
-- If user mentions "slack", "in slack", "from slack" → prioritize slack_only or set slack limit higher
-- If user mentions "confluence" → prioritize confluence_only or set confluence limit higher  
-- If user mentions "documentation", "docs", "doc", "guide", "manual", "installation" → prioritize docs_only or knowledge_base with higher limit
-- If user mentions "zendesk" or "ticket" → include zendesk in data_sources
-- If user mentions "jira" or "issue" → include jira in data_sources
+SOURCE DETECTION:
+slack mentioned → slack_only or ↑slack limit
+confluence mentioned → confluence_only or ↑conf limit
+docs/guide/manual → docs_only or ↑kb limit
+zendesk/ticket → add zendesk to sources
+jira/issue → add jira to sources
 
-Search Strategies:
-- "exact_match": For technical terms, IDs, versions (use priority_terms)
-- "fuzzy_match": For general topics, concepts
-- "semantic_search": For complex questions requiring understanding
+STRATEGY:
+exact_match: technical terms, IDs, versions
+fuzzy_match: general topics
+semantic_search: complex questions
 
-Examples:
-- "What is the latest in engineering?" → intent: "latest_message", channels: "engineering", time_range: "all"
-- "Find info about version 2024.1.2" → priority_terms: ["2024.1.2"], search_strategy: "exact_match"
-- "Incorta MCO architecture?" → keywords: ["incorta", "mco", "architecture"], mixed_search
-- "latest release announcement" → intent: "latest_message", keywords: ["latest", "release", "announcement"], priority_terms: ["release", "announcement"]
-- "Search in Slack for the delivery date of Incorta release 25.7.2" → intent: "specific_info", keywords: ["delivery", "date", "incorta", "release", "25.7.2"], priority_terms: ["25.7.2", "delivery", "date", "release"]
-- "Tell me more about that" → intent: "follow_up", needs_fresh_data: false
-
-Return ONLY the JSON response.
+Return JSON only.
 """
 
     # Step 4: Initialize API manager if not already done
@@ -440,7 +414,7 @@ Return ONLY the JSON response.
     if _api_manager:
         def _generate_intent():
             configure_genai()  # Ensure genai is configured with current key
-            model = genai.GenerativeModel("gemini-2.5-flash-lite-preview-09-2025")  # Use same model as other modules
+            model = genai.GenerativeModel("gemini-2.5-flash")  # Use same model as other modules
             response = model.generate_content(prompt)
             return response.text.strip()
         
@@ -455,13 +429,13 @@ Return ONLY the JSON response.
             logger.error(f"Intent analysis failed after trying all keys: {e}")
             # Fall back to single key attempt
             configure_genai()
-            model = genai.GenerativeModel("gemini-2.5-flash-lite-preview-09-2025")
+            model = genai.GenerativeModel("gemini-2.5-flash-lite")
             response = model.generate_content(prompt)
             response_text = response.text.strip()
     else:
         # Single key mode
         configure_genai()
-        model = genai.GenerativeModel("gemini-2.5-flash-lite-preview-09-2025")  # Use same model as other modules
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")  # Use same model as other modules
         response = model.generate_content(prompt)
         response_text = response.text.strip()
     

@@ -261,7 +261,13 @@ def _get_secret_or_env(name: str, default: str = "") -> str:
         return st.secrets.get(name, default)
     return os.getenv(name, default)
 
-GEMINI_API_KEY = _get_secret_or_env("GEMINI_API_KEY")
+GEMINI_API_KEY = (
+    _get_secret_or_env("GEMINI_API_KEY_1") or
+    _get_secret_or_env("GEMINI_API_KEY_2") or
+    _get_secret_or_env("GEMINI_API_KEY_3") or
+    _get_secret_or_env("GEMINI_API_KEY_4") or
+    _get_secret_or_env("GEMINI_API_KEY")
+)
 
 # =========================
 # CSS (consolidated)
@@ -469,7 +475,7 @@ if "agent_executor" not in st.session_state:
 
 def _ensure_gemini_key_if_needed():
     if not GEMINI_API_KEY:
-        st.error("GEMINI_API_KEY is not set. Add it to Streamlit secrets or your environment.")
+        st.error("GEMINI_API_KEY or GEMINI_API_KEY_1/2/3/4 is not set. Add it to Streamlit secrets or your environment.")
         st.stop()
 
 # =========================

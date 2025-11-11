@@ -26,17 +26,17 @@ class GeminiAPIManager:
     """
     
     def __init__(
-        self, 
-        api_keys: List[str], 
-        model: str = "gemini-2.5-flash-lite-preview-09-2025",
+        self,
+        api_keys: List[str],
+        model: str = "gemini-2.5-flash",
         rotation_strategy: str = "round_robin"
     ):
         """
         Initialize API manager with multiple keys.
-        
+
         Args:
             api_keys: List of Gemini API keys
-            model: Model to use (e.g., "gemini-2.5-flash")
+            model: Model to use (e.g., "gemini-2.0-flash-lite")
             rotation_strategy: "round_robin" or "random"
         """
         if not api_keys:

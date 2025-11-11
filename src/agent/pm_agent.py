@@ -758,7 +758,7 @@ Thought:{agent_scratchpad}"""
     # Otherwise, create standard executor with single key
     logger.info("Creating standard AgentExecutor with single API key")
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash-exp",
+        model="gemini-2.5-flash",
         temperature=0.1,
         api_key=api_key
     )
