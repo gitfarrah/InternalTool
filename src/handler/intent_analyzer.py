@@ -450,33 +450,75 @@ Return JSON only.
     
     try:
         intent_data = json.loads(response_text)
-        
+
+        # Ensure required param sections exist before further processing
+        intent_data.setdefault("slack_params", {})
+        intent_data.setdefault("confluence_params", {})
+
         # Merge smart keywords with AI-extracted keywords
         if smart_keywords:
-            slack_kw = intent_data.get("slack_params", {}).get("keywords", [])
-            conf_kw = intent_data.get("confluence_params", {}).get("keywords", [])
-            
-            # Deduplicate and combine
-            intent_data["slack_params"]["keywords"] = list(set(slack_kw + smart_keywords))
-            intent_data["confluence_params"]["keywords"] = list(set(conf_kw + smart_keywords))
-        
+            slack_kw = intent_data["slack_params"].get("keywords", [])
+            conf_kw = intent_data["confluence_params"].get("keywords", [])
+
+            # Deduplicate and combine while preserving order preference (AI first, smart additions later)
+            intent_data["slack_params"]["keywords"] = list(dict.fromkeys(slack_kw + smart_keywords))
+            intent_data["confluence_params"]["keywords"] = list(dict.fromkeys(conf_kw + smart_keywords))
+
+        # Guarantee Slack is always a searchable source and ranked first
+        current_sources = intent_data.get("data_sources") or ["slack", "confluence", "knowledge_base"]
+        if isinstance(current_sources, list):
+            normalized_sources = []
+            # Always put Slack first
+            normalized_sources.append("slack")
+            for source in current_sources:
+                if source and source.lower() != "slack":
+                    normalized_sources.append(source)
+            intent_data["data_sources"] = normalized_sources
+        else:
+            # Fallback to default ordering if the model returned an unexpected value
+            intent_data["data_sources"] = ["slack", "confluence", "knowledge_base"]
+
+        # Enforce sane defaults & floors for Slack search parameters
+        slack_params = intent_data["slack_params"]
+        slack_params.setdefault("priority_terms", [])
+        slack_params.setdefault("keywords", [])
+        slack_limit = slack_params.get("limit", 0) or 0
+        # Slack should always receive at least 20-25 results for ranking headroom
+        slack_params["limit"] = max(int(slack_limit), 25)
+        slack_params["channels"] = slack_params.get("channels", "all") or "all"
+        slack_params["time_range"] = slack_params.get("time_range", "all") or "all"
+        slack_params["sort"] = slack_params.get("sort", "relevance") or "relevance"
+
+        # Align Confluence params defaults (keep limit but ensure non-zero)
+        conf_params = intent_data["confluence_params"]
+        conf_params.setdefault("priority_terms", [])
+        conf_params.setdefault("keywords", [])
+        conf_limit = conf_params.get("limit", 0) or 0
+        conf_params["limit"] = max(int(conf_limit), 10)
+
         # Apply source priority if user explicitly mentioned sources
         if detected_sources:
             # Prioritize detected sources in data_sources list (move to front for highest priority)
             current_sources = intent_data.get("data_sources", ["slack", "confluence", "knowledge_base"])
             # Move detected sources to front - first detected source gets highest priority
-            prioritized_sources = detected_sources + [s for s in current_sources if s not in detected_sources]
+            prioritized_sources = []
+            for src in detected_sources:
+                if src not in prioritized_sources:
+                    prioritized_sources.append(src)
+            for src in current_sources:
+                if src not in prioritized_sources:
+                    prioritized_sources.append(src)
             intent_data["data_sources"] = prioritized_sources
             
             # Increase limits for prioritized sources (highest priority source gets most results)
             for idx, source in enumerate(detected_sources):
                 priority_multiplier = 2.0 if idx == 0 else 1.5  # First source gets 2x, others get 1.5x
                 if source == "slack":
-                    base_limit = intent_data.get("slack_params", {}).get("limit", 15)
-                    intent_data["slack_params"]["limit"] = int(base_limit * priority_multiplier)
+                    base_limit = intent_data["slack_params"].get("limit", 25)
+                    intent_data["slack_params"]["limit"] = max(int(base_limit * priority_multiplier), 25)
                 elif source == "confluence":
-                    base_limit = intent_data.get("confluence_params", {}).get("limit", 10)
-                    intent_data["confluence_params"]["limit"] = int(base_limit * priority_multiplier)
+                    base_limit = intent_data["confluence_params"].get("limit", 10)
+                    intent_data["confluence_params"]["limit"] = max(int(base_limit * priority_multiplier), 10)
                 elif source == "knowledge_base":
                     # Knowledge base limit is handled in search_docs_plain
                     intent_data["data_sources"] = list(set(intent_data["data_sources"] + ["knowledge_base", "docs"]))
@@ -550,14 +592,23 @@ def validate_intent(intent_data: Dict[str, Any]) -> Dict[str, Any]:
     intent_data.setdefault("query_type", "new_search")
     intent_data.setdefault("needs_fresh_data", True)
     # Include knowledge_base by default so docs are considered unless explicitly excluded
-    intent_data.setdefault("data_sources", ["slack", "confluence", "knowledge_base"])
+    data_sources = intent_data.get("data_sources", ["slack", "confluence", "knowledge_base"])
+    if not isinstance(data_sources, list):
+        data_sources = ["slack", "confluence", "knowledge_base"]
+    # Always keep Slack as primary source
+    normalized_sources = ["slack"]
+    for source in data_sources:
+        if source and source.lower() != "slack" and source not in normalized_sources:
+            normalized_sources.append(source)
+    intent_data["data_sources"] = normalized_sources
     intent_data.setdefault("search_strategy", "fuzzy_match")
     
     # Validate slack_params
     slack_params = intent_data.setdefault("slack_params", {})
     slack_params.setdefault("channels", "all")
     slack_params.setdefault("time_range", "all")  # No time restrictions - search all history
-    slack_params.setdefault("limit", 25)  # Increased default limit for comprehensive search
+    slack_limit = slack_params.get("limit", 0) or 0
+    slack_params["limit"] = max(int(slack_limit), 25)  # Ensure ample headroom for ranking
     slack_params.setdefault("sort", "relevance")
     slack_params.setdefault("keywords", [])
     slack_params.setdefault("priority_terms", [])

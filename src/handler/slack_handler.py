@@ -733,10 +733,10 @@ def strategy_2_smart_targeted_search(
         # Collect results with timeout and early-exit strategy
         try:
             completed = 0
-            for future in as_completed(future_to_channel, timeout=50):
+            for future in as_completed(future_to_channel, timeout=75):
                 channel_id = future_to_channel[future]
                 try:
-                    channel_results = future.result(timeout=10)
+                    channel_results = future.result(timeout=20)
                     all_results.extend(channel_results)
                     completed += 1
                     
@@ -1339,8 +1339,9 @@ def _rank_results(
         result.pop("semantic_score", None)
         result.pop("slack_score", None)
         result.pop("thread_relevance_score", None)
-        # Store final relevance score for UI display
+        # Store final relevance score (0-1) for UI display
         result["relevance_score"] = round(score, 4)
+        result["score"] = result["relevance_score"]
         # Keep: is_thread_reply, thread_ts for UI display if needed
         final_results.append(result)
     
@@ -1354,8 +1355,9 @@ def _rank_results(
 def search_slack(
     user_query: str,
     intent_data: Dict[str, Any],
-    max_total_results: int = 15,  # TOP 15 limit for UI
-    user_token: Optional[str] = None
+    max_total_results: int = 15,
+    user_token: Optional[str] = None,
+    pool_size: Optional[int] = None
 ) -> List[Dict[str, Any]]:
     """
     INTELLIGENT SEARCH WITH VERSION/RELEASE AWARENESS AND THREAD FOCUS
@@ -1592,16 +1594,22 @@ def search_slack(
     # STEP 5: Apply Adaptive Smart Ranking
     ranked_results = _rank_results(unique_results, user_query, intent_data, version_info)
     
-    # STEP 6: Final Output - TOP 15 messages for UI
-    if len(ranked_results) > max_total_results:
-        logger.info(f"Limiting to TOP {max_total_results} messages from {len(ranked_results)} total")
-        ranked_results = ranked_results[:max_total_results]
+    # STEP 6: Apply ranking pool size (keeps additional headroom for downstream filtering)
+    ranking_pool_size = pool_size or max(max_total_results, 25)
+    if len(ranked_results) > ranking_pool_size:
+        logger.info(f"Limiting to ranking pool of {ranking_pool_size} messages from {len(ranked_results)} total")
+        ranked_results = ranked_results[:ranking_pool_size]
     
     # STEP 7: Resolve user mentions ONLY for final top results (performance optimization)
     client = _get_slack_client(user_token)
     ranked_results = _resolve_mentions_in_results(client, ranked_results)
     
-    logger.info(f"Final results: {len(ranked_results)} messages sent to UI")
+    # STEP 8: Final Output - limit to requested top results for UI
+    if len(ranked_results) > max_total_results:
+        logger.info(f"Trimming ranking pool to TOP {max_total_results} messages for UI")
+        ranked_results = ranked_results[:max_total_results]
+    
+    logger.info(f"Final results: {len(ranked_results)} messages sent to UI (requested top {max_total_results})")
     return ranked_results
 
 

@@ -116,7 +116,7 @@ def search_confluence_tool(
 )
 def search_slack_tool(
     query: str,
-    max_results: int = 10,
+    max_results: int = 15,
     channel_filter: Optional[str] = None,
     max_age_hours: int = 0  # 0 = all history
 ) -> List[dict]:
@@ -149,7 +149,7 @@ def search_slack_tool(
             "priority_terms": priority_terms,
             "channels": channel_filter if channel_filter else "all",
             "time_range": "all",
-            "limit": max_results
+            "limit": max(max_results, 25)
         },
         "search_strategy": "fuzzy_match"
     }
@@ -165,7 +165,13 @@ def search_slack_tool(
     token_prefix = user_token[:10] if user_token else "None"
     logger.warning(f"🔐 Slack token status: {token_status} (prefix: {token_prefix}...)")
 
-    results = search_slack(query, intent_data, max_results, user_token)
+    results = search_slack(
+        user_query=query,
+        intent_data=intent_data,
+        max_total_results=max_results,
+        pool_size=max(max_results, 25),
+        user_token=user_token
+    )
 
     # Convert to legacy format for compatibility
     legacy_results = []
@@ -356,7 +362,6 @@ def search_docs(query: str, limit: int = 5) -> List[dict]:
             for item in combined_results:
                 raw_score = item.get("score", 0.0)
                 normalized = max(min(raw_score / max_score, 1.0), 0.0)
-                item["score_raw"] = raw_score
                 item["relevance_score"] = round(normalized, 4)
                 item["score"] = normalized
 
@@ -692,21 +697,22 @@ IMPORTANT SEARCH GUIDELINES:
 CRITICAL SEARCH STRATEGY WITH SOURCE PRIORITIZATION:
 
 **Source Priority Detection:**
+- Slack is the **default starting point** because it holds the freshest tribal knowledge. Even without explicit mention, BEGIN WITH SLACK.
 - If the user's query mentions "slack", "channel", "message", "conversation", or "#channelname":
-  → PRIORITIZE searching Slack FIRST, then other sources
+  → Slack still comes FIRST; then expand to other sources as needed
 - If the user's query mentions "docs", "documentation", "knowledge base", "kb", "guide", "tutorial":
-  → PRIORITIZE searching Docs FIRST, then other sources
+  → Search Slack FIRST, then Docs, followed by other sources
 - If the user's query mentions "confluence", "wiki", "page", "internal doc":
-  → PRIORITIZE searching Confluence FIRST, then other sources
+  → Search Slack FIRST, then Confluence, followed by other sources
 - If the user's query mentions "zendesk", "ticket", "customer issue":
-  → PRIORITIZE Zendesk queries FIRST, then other sources
+  → Search Slack FIRST (for tribal knowledge), then Zendesk, then others
 - If the user's query mentions "jira", "issue", "bug", "feature request", "roadmap":
-  → PRIORITIZE Jira queries FIRST, then other sources
+  → Search Slack FIRST, then Jira, then others
 
 **Search Execution:**
-- When a source is prioritized, search that source FIRST and wait for results
-- After getting prioritized source results, search other relevant sources
-- If no source is explicitly mentioned, search all sources in parallel
+- Regardless of detected priorities, issue a Slack search before consulting other sources
+- After getting prioritized source results, search other relevant sources in order of likely usefulness (Confluence → Docs → others)
+- If no source is explicitly mentioned, search Slack FIRST, then Confluence, then Docs
 - Each tool automatically handles relevance scoring - trust the results
 - If one tool returns 0 results, that's fine - combine results from other tools
 - After searching all sources, synthesize a comprehensive answer from ALL results

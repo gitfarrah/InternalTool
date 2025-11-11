@@ -557,7 +557,8 @@ def render_sources(sources):
                 timestamp = m.get('date') or m.get('ts', 'Unknown')
                 text = _clean_slack_text(m.get('text', '').strip())
                 permalink = m.get('permalink', '')
-                score = m.get('score', m.get('relevance_score', 0.0)) or 0.0
+                score = m.get('relevance_score', m.get('score', 0.0)) or 0.0
+                score_label = f"{score:.2f} ({score*100:.0f}%)"
 
                 text_escaped = html.escape(text)[:500]
                 if len(text) > 500:
@@ -573,7 +574,7 @@ def render_sources(sources):
                     <div style="color: #1f1f1f; line-height: 1.6; margin-bottom: 10px; white-space: pre-wrap;">{text_escaped}</div>
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <a href="{permalink}" target="_blank" style="color: #4A90E2; text-decoration: none; font-size: 0.9em;">View in Slack</a>
-                        <span style="color: #888; font-size: 0.85em;">Score: {score:.2f}</span>
+                        <span style="color: #888; font-size: 0.85em;">Score: {score_label}</span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -589,7 +590,8 @@ def render_sources(sources):
                 last_modified = p.get('last_modified', 'Unknown')
                 excerpt = (p.get('excerpt') or p.get('text', '')).strip()
                 url = p.get('url', '')
-                score = p.get('score', 0.0)
+                score = p.get('relevance_score', p.get('score', 0.0)) or 0.0
+                score_label = f"{score:.2f} ({score*100:.0f}%)"
 
                 # Clean excerpt from HTML tags and highlight markers
                 cleaned_excerpt = re.sub(r'@@@hl@@@(.*?)@@@endhl@@@', r'\1', excerpt)
@@ -605,7 +607,7 @@ def render_sources(sources):
                     <div style="display: flex; gap: 15px; margin-bottom: 10px; font-size: 0.9em;">
                         <span style="color: #6B46C1; font-weight: 500;">{html.escape(space)}</span>
                         <span style="color: #666;">{html.escape(last_modified)}</span>
-                        <span style="color: #888;">Score: {score:.2f}</span>
+                        <span style="color: #888;">Score: {score_label}</span>
                     </div>
                     <div style="color: #444; line-height: 1.6; margin-bottom: 10px; font-style: italic;">{html.escape(cleaned_excerpt)}</div>
                     <a href="{url}" target="_blank" style="color: #6B46C1; text-decoration: none; font-size: 0.9em;">Open Page</a>
@@ -623,14 +625,11 @@ def render_sources(sources):
                 text = (d.get('text') or '').strip()
                 steps = d.get('steps') or []
                 score = d.get('relevance_score', d.get('score', 0.0)) or 0.0
-                score_raw = d.get('score_raw')
                 source_label = d.get('source', 'Knowledge Base')
                 collection = d.get('collection')
 
                 # Prepare meta badges
-                score_label = f"{score:.3f}"
-                if score_raw is not None:
-                    score_label = f"{score:.3f} (raw {score_raw:.3f})"
+                score_label = f"{score:.2f} ({score*100:.0f}%)"
 
                 meta_badges = [
                     f"<span style='background-color: #e6f4ea; color: #1b5e20; padding: 2px 10px; border-radius: 12px; font-size: 0.8em;'>Score {score_label}</span>",
@@ -693,7 +692,8 @@ def render_sources(sources):
                 title = z.get('title', 'Untitled')
                 url = z.get('url', '')
                 text = (z.get('text') or z.get('excerpt', '')).strip()
-                score = z.get('score', 0.0)
+                score = z.get('relevance_score', z.get('score', 0.0)) or 0.0
+                score_label = f"{score:.2f} ({score*100:.0f}%)"
 
                 if len(text) > 300:
                     text = text[:300] + '...'
@@ -701,7 +701,7 @@ def render_sources(sources):
                 st.markdown(f"""
                 <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #dc3545;">
                     <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{html.escape(title)}</div>
-                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score:.2f}</div>
+                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score_label}</div>
                     <div style="color: #444; line-height: 1.6; margin-bottom: 10px;">{html.escape(text)}</div>
                     <a href="{url}" target="_blank" style="color: #dc3545; text-decoration: none; font-size: 0.9em;">View Ticket</a>
                 </div>
@@ -714,7 +714,8 @@ def render_sources(sources):
                 title = j.get('title', 'Untitled')
                 url = j.get('url', '')
                 text = (j.get('text') or j.get('excerpt', '')).strip()
-                score = j.get('score', 0.0)
+                score = j.get('relevance_score', j.get('score', 0.0)) or 0.0
+                score_label = f"{score:.2f} ({score*100:.0f}%)"
 
                 if len(text) > 300:
                     text = text[:300] + '...'
@@ -722,7 +723,7 @@ def render_sources(sources):
                 st.markdown(f"""
                 <div style="background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #0052CC;">
                     <div style="font-weight: 600; color: #1f1f1f; font-size: 1.1em; margin-bottom: 8px;">{html.escape(title)}</div>
-                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score:.2f}</div>
+                    <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Score: {score_label}</div>
                     <div style="color: #444; line-height: 1.6; margin-bottom: 10px;">{html.escape(text)}</div>
                     <a href="{url}" target="_blank" style="color: #0052CC; text-decoration: none; font-size: 0.9em;">View Issue</a>
                 </div>
@@ -967,7 +968,7 @@ def process_query(query: str):
 
         filtered_sources = []
         for source in used_sources:
-            score = source.get("score", 1.0)  # Default to 1.0 if no score
+            score = source.get("relevance_score", source.get("score", 1.0))  # Default to 1.0 if no score
             if isinstance(score, (int, float)) and score >= MIN_RELEVANCE_SCORE:
                 filtered_sources.append(source)
             elif not isinstance(score, (int, float)):

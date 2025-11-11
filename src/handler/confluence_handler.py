@@ -190,7 +190,7 @@ def search_confluence(query: str, max_results: int = 10, space_key: Optional[str
                         
                         logger.debug(f"Found page: {title}")
                         
-                        score = _compute_confluence_relevance(query, title, excerpt, last_modified)
+                        score_val = _compute_confluence_relevance(query, title, excerpt, last_modified)
                         results.append({
                             "title": title,
                             "excerpt": excerpt[:300] if excerpt else "",
@@ -198,7 +198,7 @@ def search_confluence(query: str, max_results: int = 10, space_key: Optional[str
                             "url": url,
                             "space": space_name,
                             "last_modified": last_modified,
-                            "score": score,
+                            "score": score_val,
                         })
                     
                     # If we got results, break out of the loop
@@ -223,8 +223,10 @@ def search_confluence(query: str, max_results: int = 10, space_key: Optional[str
             min_s = min(raw_scores) if raw_scores else 0.0
             rng = (max_s - min_s) if max_s != min_s else 1.0
             for r in results:
-                r["score"] = (r.get("score", 0.0) - min_s) / rng
-            results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+                normalized = (r.get("score", 0.0) - min_s) / rng
+                r["relevance_score"] = normalized
+                r["score"] = normalized
+            results.sort(key=lambda r: r.get("relevance_score", 0.0), reverse=True)
             results = results[:15]
         
         logger.info(f"Returning {len(results)} Confluence results")
@@ -309,12 +311,17 @@ def _alternative_confluence_search(client: Confluence, query: str, max_results: 
                 logger.warning(f"Failed to search space {space_key}: {e}")
                 continue
         
-        # Sort results by match score (highest first)
-        results.sort(key=lambda x: x.get("match_score", 0), reverse=True)
-        
-        # Remove match_score from final results
+        # Sort results by match score (highest first) and normalize to 0-1
+        match_scores = [r.get("match_score", 0.0) for r in results]
+        max_match = max(match_scores) if match_scores else 0.0
+        min_match = min(match_scores) if match_scores else 0.0
+        rng_match = (max_match - min_match) if max_match != min_match else 1.0
         for result in results:
+            normalized = (result.get("match_score", 0.0) - min_match) / rng_match
+            result["relevance_score"] = normalized
+            result["score"] = normalized
             result.pop("match_score", None)
+        results.sort(key=lambda x: x.get("relevance_score", 0.0), reverse=True)
         
         logger.info(f"Alternative search found {len(results)} results")
         
