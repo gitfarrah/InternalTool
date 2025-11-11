@@ -714,7 +714,9 @@ Always articulate in your **Thought** why each source is (or isn’t) being sear
 **Search Execution:**
 - Start with a brief plan in your Thought describing which sources you will search and why.
 - Regardless of detected priorities, issue a Slack search before consulting other sources.
-- After reviewing Slack results, reassess whether additional sources (Confluence, Docs, Zendesk, Jira) might add context or confirmation. If you skip them, state the reason in your Thought.
+- After reviewing Slack results, you MUST either:
+  * Run at least one additional source search (Confluence or Docs by default, plus Zendesk/Jira when relevant), or
+  * Explicitly justify in your Thought why no other source is necessary (only acceptable when the query is clearly Slack-specific).
 - For release/version questions, Slack is first, but also consider Confluence or Docs for official notes unless they are clearly unnecessary.
 - If no source is explicitly mentioned, search Slack FIRST, then Confluence, then Docs.
 - Each tool automatically handles relevance scoring - trust the results

@@ -467,12 +467,14 @@ Return JSON only.
         # Guarantee Slack is always a searchable source and ranked first
         current_sources = intent_data.get("data_sources") or ["slack", "confluence", "knowledge_base"]
         if isinstance(current_sources, list):
-            normalized_sources = []
-            # Always put Slack first
-            normalized_sources.append("slack")
+            normalized_sources = ["slack"]
             for source in current_sources:
-                if source and source.lower() != "slack":
+                if source and source.lower() != "slack" and source not in normalized_sources:
                     normalized_sources.append(source)
+            # Ensure we always include at least Confluence and Knowledge Base as fallbacks
+            for default_source in ["confluence", "knowledge_base"]:
+                if default_source not in normalized_sources:
+                    normalized_sources.append(default_source)
             intent_data["data_sources"] = normalized_sources
         else:
             # Fallback to default ordering if the model returned an unexpected value
