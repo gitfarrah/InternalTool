@@ -709,10 +709,14 @@ CRITICAL SEARCH STRATEGY WITH SOURCE PRIORITIZATION:
 - If the user's query mentions "jira", "issue", "bug", "feature request", "roadmap":
   → Search Slack FIRST, then Jira, then others
 
+Always articulate in your **Thought** why each source is (or isn’t) being searched before taking action.
+
 **Search Execution:**
-- Regardless of detected priorities, issue a Slack search before consulting other sources
-- After getting prioritized source results, search other relevant sources in order of likely usefulness (Confluence → Docs → others)
-- If no source is explicitly mentioned, search Slack FIRST, then Confluence, then Docs
+- Start with a brief plan in your Thought describing which sources you will search and why.
+- Regardless of detected priorities, issue a Slack search before consulting other sources.
+- After reviewing Slack results, reassess whether additional sources (Confluence, Docs, Zendesk, Jira) might add context or confirmation. If you skip them, state the reason in your Thought.
+- For release/version questions, Slack is first, but also consider Confluence or Docs for official notes unless they are clearly unnecessary.
+- If no source is explicitly mentioned, search Slack FIRST, then Confluence, then Docs.
 - Each tool automatically handles relevance scoring - trust the results
 - If one tool returns 0 results, that's fine - combine results from other tools
 - After searching all sources, synthesize a comprehensive answer from ALL results
